@@ -194,6 +194,55 @@
 
     <!-- 告警 Toast -->
     <div id="toast-container"></div>
+
+    <div id="assistant-bot" class="assistant-bot">
+      <button id="assistant-toggle" class="assistant-toggle" onclick="App.toggleAssistant()" aria-expanded="false">
+        <span class="assistant-face assistant-face-button" aria-hidden="true">
+          <span class="assistant-eye"></span>
+          <span class="assistant-eye"></span>
+          <span class="assistant-mouth"></span>
+        </span>
+        <span class="assistant-toggle-label">Alert Agent</span>
+      </button>
+      <div id="assistant-panel" class="assistant-panel hidden">
+        <div class="assistant-panel-inner">
+          <div class="assistant-header" onmousedown="App.startDrag(event)">
+            <div class="assistant-title">
+              <span class="assistant-face assistant-face-mini" aria-hidden="true">
+                <span class="assistant-eye"></span>
+                <span class="assistant-eye"></span>
+                <span class="assistant-mouth"></span>
+              </span>
+              <div>
+                <strong>小智助手</strong>
+                <div class="assistant-subtitle">点击问题，或直接问它</div>
+              </div>
+            </div>
+            <button class="assistant-close" onclick="App.toggleAssistant()" aria-label="关闭">×</button>
+          </div>
+
+          <div class="assistant-quick-actions">
+            <button class="btn small" onclick="App.askAssistant('这个异常的根因是什么？')">🛠 根因</button>
+            <button class="btn small" onclick="App.askAssistant('应该怎么处理？')">✅ 建议</button>
+            <button class="btn small" onclick="App.askAssistant('是否需要升级为严重告警？')">⚠️ 升级</button>
+            <button class="btn small" onclick="App.askAssistant('当前告警影响有多大？')">💡 影响</button>
+          </div>
+
+          <div id="assistant-history" class="assistant-history"></div>
+          <div id="assistant-status" class="assistant-status">准备就绪，欢迎提问</div>
+
+          <div class="assistant-input-row">
+            <input id="assistant-input" class="assistant-input" placeholder="输入你的问题，按回车发送" />
+            <button class="assistant-icon-btn" onclick="App.startVoiceInput()" title="语音输入">🎤</button>
+            <button class="assistant-icon-btn" onclick="App.askAssistant()" title="发送">➤</button>
+          </div>
+
+          <div class="assistant-footer">
+            <button class="btn small" onclick="App.speakLastAnswer()">🔊 回放回复</button>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
   <script src="/static/js/app.js"></script>
 </body>
