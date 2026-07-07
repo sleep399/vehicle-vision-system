@@ -24,7 +24,7 @@ async def recognize(
     try:
         result = police_gesture_service.recognize(content)
     except Exception as e:
-        write_log(db, "police_gesture", f"识别失败: {e}", level="ERROR")
+        write_log(db, "police_gesture", f"识别失败: {e}", level="ERROR", user_id=user.id if user else None)
         raise HTTPException(500, str(e))
 
     alert_agent.record_gesture_confidence("police", result["confidence"])
@@ -48,7 +48,7 @@ async def recognize(
     db.commit()
     db.refresh(record)
 
-    write_log(db, "police_gesture", f"识别手势: {result['gesture_cn']} ({result['confidence']:.0%})")
+    write_log(db, "police_gesture", f"识别手势: {result['gesture_cn']} ({result['confidence']:.0%})", user_id=user.id if user else None)
     return GestureResponse(**{k: v for k, v in result.items() if k != "gesture_id"}, record_id=record.id)
 
 
