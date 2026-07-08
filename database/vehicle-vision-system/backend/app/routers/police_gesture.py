@@ -77,6 +77,19 @@ def gesture_list():
     return [{"id": k, "en": v[0], "cn": v[1]} for k, v in POLICE_GESTURES.items() if k > 0]
 
 
+@router.get("/pose-backend")
+def get_pose_backend():
+    return police_gesture_service.pose_backend_info()
+
+
+@router.put("/pose-backend")
+async def set_pose_backend(payload: dict):
+    try:
+        return police_gesture_service.set_pose_backend(str(payload.get("backend", "")))
+    except Exception as exc:
+        raise HTTPException(400, str(exc))
+
+
 @router.get("/history")
 def history(skip: int = 0, limit: int = 20, db: Session = Depends(get_db)):
     records = db.query(PoliceGestureRecord).order_by(PoliceGestureRecord.created_at.desc()).offset(skip).limit(limit).all()

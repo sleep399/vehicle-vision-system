@@ -52,6 +52,10 @@ class PoliceGestureService:
         self.sequence_steps = 30
         self._predictor = None
         self._pg = None
+        self._bla = None
+        self._g_model = None
+        self._yolo_model = None
+        self._pose_backend_override: str | None = None
         self._model_lock = threading.RLock()
 
     @property
@@ -63,8 +67,20 @@ class PoliceGestureService:
     @property
     def pg(self):
         if self._pg is None:
-            self._predictor = self._load_ctpgr_predictor()
+            self._load_ctpgr_classifier()
         return self._pg
+
+    @property
+    def bla(self):
+        if self._bla is None:
+            self._load_ctpgr_classifier()
+        return self._bla
+
+    @property
+    def g_model(self):
+        if self._g_model is None:
+            self._load_ctpgr_classifier()
+        return self._g_model
 
     def _load_ctpgr_predictor(self):
         if not self.ctpgr_root.exists():
@@ -80,7 +96,62 @@ class PoliceGestureService:
             from constants.enum_keys import PG
             from pred.gesture_pred import GesturePred
             self._pg = PG
-            return GesturePred()
+            predictor = GesturePred()
+            self._bla = predictor.bla
+            self._g_model = predictor.g_model
+            return predictor
+
+    def _load_ctpgr_classifier(self) -> None:
+        if self._g_model is not None and self._bla is not None and self._pg is not None:
+            return
+        if self.ctpgr_root.exists():
+            root_str = str(self.ctpgr_root)
+            if root_str not in sys.path:
+                sys.path.insert(0, root_str)
+        with _working_directory(self.ctpgr_root):
+            from constants.enum_keys import PG
+            from models.gesture_recognition_model import GestureRecognitionModel
+            from pgdataset.s3_handcraft import BoneLengthAngle
+            self._pg = PG
+            self._bla = BoneLengthAngle()
+            self._g_model = GestureRecognitionModel(1)
+            self._g_model.load_ckpt(allow_new=False)
+            self._g_model.eval()
+
+    @property
+    def pose_backend(self) -> str:
+        backend = (self._pose_backend_override or settings.police_pose_backend or "ctpgr").strip().lower()
+        if backend not in {"ctpgr", "yolo"}:
+            return "ctpgr"
+        return backend
+
+    def set_pose_backend(self, backend: str) -> dict[str, Any]:
+        backend = (backend or "").strip().lower()
+        if backend not in {"ctpgr", "yolo"}:
+            raise ValueError("pose backend must be 'ctpgr' or 'yolo'")
+        if backend == "yolo":
+            _ = self.yolo_model
+        self._pose_backend_override = backend
+        return self.pose_backend_info()
+
+    def pose_backend_info(self) -> dict[str, Any]:
+        return {
+            "backend": self.pose_backend,
+            "available": ["ctpgr", "yolo"],
+            "yolo_model": settings.police_yolo_pose_model,
+            "yolo_loaded": self._yolo_model is not None,
+        }
+
+    @property
+    def yolo_model(self):
+        if self._yolo_model is None:
+            try:
+                from ultralytics import YOLO
+            except ImportError as exc:
+                raise RuntimeError("YOLO pose backend requires: pip install ultralytics") from exc
+            model_path = settings.police_yolo_pose_model or "yolov8n-pose.pt"
+            self._yolo_model = YOLO(model_path)
+        return self._yolo_model
 
     def _detect_best_frame(self, image_bytes: bytes) -> np.ndarray:
         try:
@@ -114,8 +185,8 @@ class PoliceGestureService:
 
     def create_sequence_state(self) -> dict[str, torch.Tensor]:
         return {
-            "h": torch.zeros_like(self.predictor.g_model.h0()),
-            "c": torch.zeros_like(self.predictor.g_model.c0()),
+            "h": torch.zeros_like(self.g_model.h0()),
+            "c": torch.zeros_like(self.g_model.c0()),
         }
 
     def reset_sequence_state(self) -> None:
@@ -141,6 +212,89 @@ class PoliceGestureService:
         for point in points.values():
             cv2.circle(image, point, 4, (0, 200, 255), -1)
 
+    def _coord_from_yolo_pose(self, ctpgr_image: np.ndarray) -> np.ndarray:
+        with self._model_lock:
+            results = self.yolo_model.predict(ctpgr_image, verbose=False, imgsz=self.input_size[0], device="cpu")
+        if not results or results[0].keypoints is None or results[0].keypoints.xy is None:
+            raise ValueError("YOLO pose did not detect a person")
+
+        keypoints_xy = results[0].keypoints.xy.cpu().numpy()
+        keypoints_conf = results[0].keypoints.conf
+        keypoints_conf = keypoints_conf.cpu().numpy() if keypoints_conf is not None else np.ones(keypoints_xy.shape[:2], dtype=np.float32)
+        if keypoints_xy.size == 0:
+            raise ValueError("YOLO pose did not return keypoints")
+
+        person_index = 0
+        boxes = getattr(results[0], "boxes", None)
+        if boxes is not None and boxes.xyxy is not None and len(boxes.xyxy):
+            xyxy = boxes.xyxy.cpu().numpy()
+            areas = np.maximum(0, xyxy[:, 2] - xyxy[:, 0]) * np.maximum(0, xyxy[:, 3] - xyxy[:, 1])
+            person_index = int(np.argmax(areas))
+
+        coco = keypoints_xy[person_index]
+        conf = keypoints_conf[person_index]
+        min_conf = float(settings.police_yolo_keypoint_conf)
+
+        def pick(index: int) -> np.ndarray:
+            point = coco[index].astype(np.float32)
+            if conf[index] < min_conf or np.allclose(point, 0):
+                return np.array([np.nan, np.nan], dtype=np.float32)
+            return point
+
+        right_shoulder = pick(6)
+        right_elbow = pick(8)
+        right_wrist = pick(10)
+        left_shoulder = pick(5)
+        left_elbow = pick(7)
+        left_wrist = pick(9)
+        right_hip = pick(12)
+        right_knee = pick(14)
+        right_ankle = pick(16)
+        left_hip = pick(11)
+        left_knee = pick(13)
+        left_ankle = pick(15)
+
+        shoulder_points = np.stack([right_shoulder, left_shoulder])
+        neck = np.nanmean(shoulder_points, axis=0)
+        if np.isnan(neck).any():
+            raise ValueError("YOLO pose shoulders are not reliable enough")
+
+        head_candidates = np.stack([pick(0), pick(1), pick(2), pick(3), pick(4)])
+        valid_head = head_candidates[~np.isnan(head_candidates).any(axis=1)]
+        if len(valid_head):
+            head_x = float(np.nanmean(valid_head[:, 0]))
+            head_y = float(np.nanmin(valid_head[:, 1]))
+        else:
+            head_x, head_y = float(neck[0]), float(neck[1])
+        shoulder_width = float(np.linalg.norm(left_shoulder - right_shoulder)) if not np.isnan(shoulder_points).any() else 40.0
+        head_top = np.array([head_x, max(0.0, head_y - 0.25 * shoulder_width)], dtype=np.float32)
+
+        ctpgr_points = np.stack(
+            [
+                right_shoulder,
+                right_elbow,
+                right_wrist,
+                left_shoulder,
+                left_elbow,
+                left_wrist,
+                right_hip,
+                right_knee,
+                right_ankle,
+                left_hip,
+                left_knee,
+                left_ankle,
+                head_top,
+                neck.astype(np.float32),
+            ],
+            axis=0,
+        )
+        if np.isnan(ctpgr_points).any():
+            raise ValueError("YOLO pose missing required body keypoints")
+        w, h = self.input_size
+        ctpgr_points[:, 0] = np.clip(ctpgr_points[:, 0] / w, 0.0, 1.0)
+        ctpgr_points[:, 1] = np.clip(ctpgr_points[:, 1] / h, 0.0, 1.0)
+        return ctpgr_points.T[np.newaxis].astype(np.float32)
+
     def _result_payload(self, ctpgr_image: np.ndarray, result) -> dict[str, Any]:
         gesture_id = int(result[self.pg.OUT_ARGMAX])
         scores = result[self.pg.OUT_SCORES]
@@ -155,18 +309,21 @@ class PoliceGestureService:
             "gesture_cn": cn,
             "gesture_id": gesture_id,
             "confidence": round(confidence, 3),
+            "pose_backend": self.pose_backend,
             "keypoints": keypoints,
             "annotated_image": ndarray_to_base64(annotated),
             "success": gesture_id > 0,
         }
 
     def _coord_from_prepared_image(self, ctpgr_image: np.ndarray) -> np.ndarray:
+        if self.pose_backend == "yolo":
+            return self._coord_from_yolo_pose(ctpgr_image)
         with self._model_lock:
             pose = self.predictor.p_predictor.get_coordinates(ctpgr_image)
         return pose[self.pg.COORD_NORM][np.newaxis]
 
     def _classify_coord(self, coord_norm: np.ndarray, state: dict[str, torch.Tensor] | None = None):
-        features_dict = self.predictor.bla.handcrafted_features(coord_norm)
+        features_dict = self.bla.handcrafted_features(coord_norm)
         features = np.concatenate(
             (
                 features_dict[self.pg.BONE_LENGTH],
@@ -176,11 +333,11 @@ class PoliceGestureService:
             axis=1,
         )
         features = features[np.newaxis].transpose((1, 0, 2))
-        features = torch.from_numpy(features).to(self.predictor.g_model.device, dtype=torch.float32)
+        features = torch.from_numpy(features).to(self.g_model.device, dtype=torch.float32)
         if state is None:
             state = self.create_sequence_state()
         with self._model_lock, torch.no_grad():
-            _, h, c, class_out = self.predictor.g_model(features, state["h"], state["c"])
+            _, h, c, class_out = self.g_model(features, state["h"], state["c"])
         state["h"], state["c"] = h, c
         scores = class_out[0].cpu().numpy()
         return {self.pg.OUT_ARGMAX: int(np.argmax(scores)), self.pg.OUT_SCORES: scores, self.pg.COORD_NORM: coord_norm}

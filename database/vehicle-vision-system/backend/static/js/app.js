@@ -66,7 +66,7 @@ const App = {
   onViewChange(view) {
     if (view === 'dashboard') this.loadDashboard();
     if (view === 'lpr') { this.loadLprHistory(); }
-    if (view === 'police') { this.loadPoliceGestures(); this.loadPoliceHistory(); }
+    if (view === 'police') { this.ensurePolicePoseBackendControl(); this.loadPolicePoseBackend(); this.loadPoliceGestures(); this.loadPoliceHistory(); }
     if (view === 'owner') { this.loadOwnerGestures(); this.loadVehicleState(); }
     if (view === 'alerts') { this.loadAlerts(); this.connectAlertWs(); }
     if (view === 'logs') this.loadLogs();
@@ -284,27 +284,12 @@ const App = {
     const stepSeconds = 1 / sampleFps;
     let nextTime = 0;
     let processedFrames = 0;
-    let lastDisplayedTime = -1;
-    const recognitionVideo = document.createElement('video');
-    recognitionVideo.preload = 'auto';
-    recognitionVideo.muted = true;
-    recognitionVideo.src = video.currentSrc || video.src;
-    this.uploadedRecognitionVideo = recognitionVideo;
+    const recognitionVideo = video;
+    this.uploadedRecognitionVideo = null;
 
-    const updateVisibleLabel = () => {
-      if (!resultBox || !this.uploadedRecognitionResults.length) return;
-      const current = video.currentTime || 0;
-      let match = null;
-      for (const row of this.uploadedRecognitionResults) {
-        if (row.time_sec <= current + 0.25) match = row;
-        else break;
-      }
-      match = match || this.uploadedRecognitionResults[this.uploadedRecognitionResults.length - 1];
-      if (!match || match.time_sec === lastDisplayedTime) return;
-      lastDisplayedTime = match.time_sec;
-      const lag = Math.max(0, current - match.time_sec);
-      const lagText = lag > 1 ? `<br><small>recognition ${match.time_sec.toFixed(1)}s / playing ${current.toFixed(1)}s</small>` : '';
-      resultBox.innerHTML = `${match.gesture_cn}<br><small>confidence ${(match.confidence * 100).toFixed(0)}%</small>${lagText}`;
+    const renderSynchronizedResult = (row) => {
+      if (!resultBox || !row) return;
+      resultBox.innerHTML = `${row.gesture_cn}<br><small>confidence ${(row.confidence * 100).toFixed(0)}%</small><br><small>video ${row.time_sec.toFixed(1)}s / recognized ${processedFrames} frames</small>`;
     };
 
     const updateStatus = () => {
@@ -322,13 +307,22 @@ const App = {
         if (resultBox) resultBox.insertAdjacentHTML('beforeend', '<br><small>recognition finished</small>');
         return;
       }
+      if (video.paused && processedFrames > 0) {
+        if (resultBox) resultBox.insertAdjacentHTML('beforeend', '<br><small>paused</small>');
+        return;
+      }
       recognitionVideo.pause();
       updateStatus();
       if (Math.abs(recognitionVideo.currentTime - nextTime) < 0.001 && recognitionVideo.readyState >= 2) {
         sendCurrentFrame();
-      } else {
-        recognitionVideo.currentTime = nextTime;
+        return;
       }
+      const sendAfterData = () => {
+        if (Math.abs(recognitionVideo.currentTime - nextTime) < 0.001 && recognitionVideo.readyState >= 2) sendCurrentFrame();
+      };
+      recognitionVideo.addEventListener('loadeddata', sendAfterData, { once: true });
+      recognitionVideo.addEventListener('canplay', sendAfterData, { once: true });
+      recognitionVideo.currentTime = nextTime;
     };
 
     const sendCurrentFrame = () => {
@@ -346,8 +340,9 @@ const App = {
 
     this.wsStream.onopen = () => {
       recognitionVideo.onseeked = sendCurrentFrame;
-      this.uploadedLabelInterval = setInterval(updateVisibleLabel, 200);
-      video.play().catch(() => {});
+      video.pause();
+      video.onplay = () => setTimeout(seekNextFrame, 20);
+      video.onpause = () => {};
       if (recognitionVideo.readyState >= 1) {
         nextTime = 0;
         seekNextFrame();
@@ -367,8 +362,10 @@ const App = {
       const msg = JSON.parse(e.data);
       if (msg.type === 'result') {
         processedFrames += 1;
-        this.uploadedRecognitionResults.push({ ...msg.data, time_sec: nextTime });
-        updateVisibleLabel();
+        const row = { ...msg.data, time_sec: nextTime };
+        this.uploadedRecognitionResults.push(row);
+        video.currentTime = nextTime;
+        renderSynchronizedResult(row);
         nextTime += stepSeconds;
         setTimeout(seekNextFrame, 20);
       }
@@ -440,6 +437,56 @@ const App = {
         `<span class="gesture-tag">${g.cn}</span>`
       ).join('');
     } catch (e) {}
+  },
+
+  ensurePolicePoseBackendControl() {
+    if (document.getElementById('police-pose-backend')) return;
+    const streamUrlInput = document.getElementById('police-stream-url');
+    if (!streamUrlInput) return;
+    const row = document.createElement('div');
+    row.className = 'stream-url-row';
+    row.innerHTML = `
+      <select id="police-pose-backend">
+        <option value="ctpgr">CTPGR Pose</option>
+        <option value="yolo">YOLO-Pose</option>
+      </select>
+      <button class="btn" onclick="App.setPolicePoseBackend()">切换模型</button>
+      <span id="police-pose-backend-status" style="color:var(--text-muted);align-self:center"></span>
+    `;
+    streamUrlInput.closest('.stream-url-row')?.before(row);
+  },
+
+  async loadPolicePoseBackend() {
+    this.ensurePolicePoseBackendControl();
+    try {
+      const data = await this.api('/api/police-gesture/pose-backend');
+      const select = document.getElementById('police-pose-backend');
+      const status = document.getElementById('police-pose-backend-status');
+      if (select) select.value = data.backend || 'ctpgr';
+      if (status) status.textContent = data.backend === 'yolo' ? 'YOLO experimental' : 'stable';
+    } catch (e) {}
+  },
+
+  async setPolicePoseBackend() {
+    const select = document.getElementById('police-pose-backend');
+    const status = document.getElementById('police-pose-backend-status');
+    const backend = select?.value || 'ctpgr';
+    this.stopStream();
+    if (status) status.textContent = 'switching...';
+    try {
+      const data = await this.api('/api/police-gesture/pose-backend', {
+        method: 'PUT',
+        body: JSON.stringify({ backend }),
+      });
+      if (select) select.value = data.backend;
+      if (status) status.textContent = data.backend === 'yolo' ? 'YOLO experimental' : 'stable';
+      const resultBox = document.getElementById('police-result');
+      if (resultBox) resultBox.innerHTML = `当前模型：${data.backend === 'yolo' ? 'YOLO-Pose' : 'CTPGR Pose'}`;
+    } catch (e) {
+      if (status) status.textContent = 'failed';
+      alert(e.message);
+      this.loadPolicePoseBackend();
+    }
   },
 
   async loadPoliceHistory() {
