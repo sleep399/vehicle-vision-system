@@ -235,11 +235,24 @@ const App = {
   showUploadPreview(module, file, isVideo) {
     const imagePreview = document.getElementById(module + '-preview');
     const videoPreview = document.getElementById(module + '-upload-preview');
+    const policeVideoControls = module === 'police' ? document.getElementById('police-upload-controls') : null;
+    const policePlayButton = module === 'police' ? document.getElementById('police-upload-play') : null;
     const url = URL.createObjectURL(file);
     if (isVideo) {
       if (videoPreview) {
+        videoPreview.pause();
         videoPreview.src = url;
+        videoPreview.preload = 'auto';
+        videoPreview.playsInline = true;
+        videoPreview.controls = true;
         videoPreview.hidden = false;
+        videoPreview.load();
+      }
+      if (policeVideoControls) {
+        policeVideoControls.hidden = false;
+      }
+      if (policePlayButton) {
+        policePlayButton.textContent = '播放视频';
       }
       if (imagePreview) {
         imagePreview.removeAttribute('src');
@@ -253,9 +266,31 @@ const App = {
       videoPreview.removeAttribute('src');
       videoPreview.hidden = true;
     }
+    if (policeVideoControls) {
+      policeVideoControls.hidden = true;
+    }
     if (imagePreview) {
       imagePreview.src = url;
       imagePreview.hidden = false;
+    }
+  },
+
+  async toggleUploadedPolicePlayback() {
+    const video = document.getElementById('police-upload-preview');
+    const button = document.getElementById('police-upload-play');
+    const resultBox = document.getElementById('police-result');
+    if (!video || video.hidden || !video.src) return;
+    try {
+      if (video.paused || video.ended) {
+        if (video.ended) video.currentTime = 0;
+        await video.play();
+      } else {
+        video.pause();
+      }
+    } catch (e) {
+      if (resultBox) resultBox.innerHTML = `视频播放失败：${e.message || e}`;
+    } finally {
+      if (button) button.textContent = video.paused ? '播放视频' : '暂停视频';
     }
   },
 
@@ -333,8 +368,17 @@ const App = {
     };
 
     this.wsStream.onopen = () => {
-      video.onplay = () => { waitingForFirstPlay = false; updateStatus(); };
-      video.onpause = () => { if (resultBox) resultBox.dataset.status = 'paused'; };
+      video.onplay = () => {
+        waitingForFirstPlay = false;
+        const button = document.getElementById('police-upload-play');
+        if (button) button.textContent = '暂停视频';
+        updateStatus();
+      };
+      video.onpause = () => {
+        const button = document.getElementById('police-upload-play');
+        if (button) button.textContent = '播放视频';
+        if (resultBox) resultBox.dataset.status = 'paused';
+      };
       video.onseeked = () => { lastResultAt = -1; updateStatus(); };
       this.streamInterval = setInterval(tick, 40);
       updateStatus();
