@@ -51,7 +51,12 @@ async def ws_stream(websocket: WebSocket, module: str):
             if msg.get("type") == "frame":
                 frame = _decode_jpeg_frame(msg["data"])
                 result = await _run_blocking(police_gesture_service.recognize_frame_continuous, frame, sequence_state)
-                await websocket.send_json({"type": "result", "module": module, "data": result})
+                await websocket.send_json({
+                    "type": "result",
+                    "module": module,
+                    "time_sec": msg.get("time_sec"),
+                    "data": result,
+                })
             elif msg.get("type") == "ping":
                 await websocket.send_json({"type": "pong"})
     except WebSocketDisconnect:

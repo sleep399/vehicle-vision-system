@@ -272,7 +272,7 @@ const App = {
     const canvas = document.getElementById('police-canvas');
     const resultBox = document.getElementById('police-result');
     if (!video || !canvas) return;
-    if (resultBox) resultBox.innerHTML = 'Preparing background recognition...';
+    if (resultBox) resultBox.innerHTML = '播放视频后开始实时识别...';
 
     this.streamModule = 'police';
     this.streamBusy = false;
@@ -280,78 +280,64 @@ const App = {
     const ctx = canvas.getContext('2d');
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     this.wsStream = new WebSocket(`${proto}://${location.host}/ws/stream/police`);
-    const sampleFps = 15;
-    const stepSeconds = 1 / sampleFps;
-    let nextTime = 0;
+    const sampleFps = 8;
+    const sampleMs = 1000 / sampleFps;
     let processedFrames = 0;
-    const recognitionVideo = video;
-    this.uploadedRecognitionVideo = null;
+    let lastSentAt = 0;
+    let lastResultAt = -1;
+    let waitingForFirstPlay = true;
 
     const renderSynchronizedResult = (row) => {
       if (!resultBox || !row) return;
-      resultBox.innerHTML = `${row.gesture_cn}<br><small>confidence ${(row.confidence * 100).toFixed(0)}%</small><br><small>video ${row.time_sec.toFixed(1)}s / recognized ${processedFrames} frames</small>`;
+      const now = Number.isFinite(video.currentTime) ? video.currentTime : row.time_sec;
+      const lag = Math.max(0, now - row.time_sec);
+      resultBox.innerHTML = `${row.gesture_cn}<br><small>confidence ${(row.confidence * 100).toFixed(0)}%</small><br><small>video ${now.toFixed(1)}s / label ${row.time_sec.toFixed(1)}s / lag ${lag.toFixed(1)}s</small>`;
     };
 
     const updateStatus = () => {
       if (!resultBox) return;
-      const duration = Number.isFinite(recognitionVideo.duration) ? recognitionVideo.duration : 0;
-      const current = Math.min(nextTime, duration || nextTime);
+      const duration = Number.isFinite(video.duration) ? video.duration : 0;
+      const current = Number.isFinite(video.currentTime) ? video.currentTime : 0;
       resultBox.dataset.status = `sampled ${processedFrames} frames`;
-      if (!this.uploadedRecognitionResults.length) resultBox.innerHTML = `Recognizing in background at ${sampleFps} FPS...<br><small>${current.toFixed(1)}s / ${duration ? duration.toFixed(1) : '?'}s</small>`;
-    };
-
-    const seekNextFrame = () => {
-      if (!this.streamModule || this.wsStream?.readyState !== WebSocket.OPEN) return;
-      const duration = Number.isFinite(recognitionVideo.duration) ? recognitionVideo.duration : 0;
-      if (duration && nextTime > duration) {
-        if (resultBox) resultBox.insertAdjacentHTML('beforeend', '<br><small>recognition finished</small>');
-        return;
+      if (!this.uploadedRecognitionResults.length) {
+        const status = waitingForFirstPlay ? '等待播放视频...' : `实时识别中，最高 ${sampleFps} FPS...`;
+        resultBox.innerHTML = `${status}<br><small>${current.toFixed(1)}s / ${duration ? duration.toFixed(1) : '?'}s</small>`;
       }
-      if (video.paused && processedFrames > 0) {
-        if (resultBox) resultBox.insertAdjacentHTML('beforeend', '<br><small>paused</small>');
-        return;
-      }
-      recognitionVideo.pause();
-      updateStatus();
-      if (Math.abs(recognitionVideo.currentTime - nextTime) < 0.001 && recognitionVideo.readyState >= 2) {
-        sendCurrentFrame();
-        return;
-      }
-      const sendAfterData = () => {
-        if (Math.abs(recognitionVideo.currentTime - nextTime) < 0.001 && recognitionVideo.readyState >= 2) sendCurrentFrame();
-      };
-      recognitionVideo.addEventListener('loadeddata', sendAfterData, { once: true });
-      recognitionVideo.addEventListener('canplay', sendAfterData, { once: true });
-      recognitionVideo.currentTime = nextTime;
     };
 
     const sendCurrentFrame = () => {
-      if (!this.streamModule || recognitionVideo.readyState < 2 || this.streamBusy || this.wsStream?.readyState !== WebSocket.OPEN) return;
+      if (!this.streamModule || this.wsStream?.readyState !== WebSocket.OPEN) return;
+      if (video.paused || video.ended || video.readyState < 2 || this.streamBusy) return;
+      const timeSec = Number.isFinite(video.currentTime) ? video.currentTime : 0;
+      if (timeSec <= lastResultAt && processedFrames > 0) return;
       this.streamBusy = true;
-      canvas.width = recognitionVideo.videoWidth || 512;
-      canvas.height = recognitionVideo.videoHeight || 512;
-      ctx.drawImage(recognitionVideo, 0, 0, canvas.width, canvas.height);
+      updateStatus();
+      canvas.width = video.videoWidth || 512;
+      canvas.height = video.videoHeight || 512;
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
       const dataUrl = canvas.toDataURL('image/jpeg', 0.72);
-      this.wsStream.send(JSON.stringify({ type: 'frame', data: dataUrl.split(',')[1], time_sec: recognitionVideo.currentTime }));
+      this.wsStream.send(JSON.stringify({ type: 'frame', data: dataUrl.split(',')[1], time_sec: timeSec }));
       this.streamTimeout = setTimeout(() => {
         this.streamBusy = false;
-      }, 10000);
+      }, 5000);
+    };
+
+    const tick = () => {
+      if (!this.streamModule) return;
+      const now = performance.now();
+      if (now - lastSentAt >= sampleMs) {
+        lastSentAt = now;
+        sendCurrentFrame();
+      }
+      if (!video.paused && !video.ended) updateStatus();
     };
 
     this.wsStream.onopen = () => {
-      recognitionVideo.onseeked = sendCurrentFrame;
-      video.pause();
-      video.onplay = () => setTimeout(seekNextFrame, 20);
-      video.onpause = () => {};
-      if (recognitionVideo.readyState >= 1) {
-        nextTime = 0;
-        seekNextFrame();
-      } else {
-        recognitionVideo.onloadedmetadata = () => {
-          nextTime = 0;
-          seekNextFrame();
-        };
-      }
+      video.onplay = () => { waitingForFirstPlay = false; updateStatus(); };
+      video.onpause = () => { if (resultBox) resultBox.dataset.status = 'paused'; };
+      video.onseeked = () => { lastResultAt = -1; updateStatus(); };
+      this.streamInterval = setInterval(tick, 40);
+      updateStatus();
     };
     this.wsStream.onmessage = (e) => {
       if (this.streamTimeout) {
@@ -362,12 +348,10 @@ const App = {
       const msg = JSON.parse(e.data);
       if (msg.type === 'result') {
         processedFrames += 1;
-        const row = { ...msg.data, time_sec: nextTime };
+        const row = { ...msg.data, time_sec: Number(msg.time_sec ?? msg.data?.time_sec ?? video.currentTime ?? 0) };
         this.uploadedRecognitionResults.push(row);
-        video.currentTime = nextTime;
+        lastResultAt = row.time_sec;
         renderSynchronizedResult(row);
-        nextTime += stepSeconds;
-        setTimeout(seekNextFrame, 20);
       }
       if (msg.type === 'error' && resultBox) resultBox.innerHTML = `Video recognition error: ${msg.message}`;
     };
