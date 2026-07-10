@@ -41,6 +41,9 @@ class Settings(BaseSettings):
     gesture_hold_threshold: float = 0.8
     alert_failure_threshold: int = 5
     low_confidence_threshold: float = 0.4
+    police_pose_backend: str = "ctpgr"
+    police_yolo_pose_model: str = "yolov8n-pose.pt"
+    police_yolo_keypoint_conf: float = 0.15
 
     class Config:
         env_file = str(BASE_DIR / ".env")
