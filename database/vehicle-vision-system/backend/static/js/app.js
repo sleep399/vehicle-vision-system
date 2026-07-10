@@ -2,6 +2,8 @@ const App = {
   token: localStorage.getItem('token') || '',
   streamModule: null,
   streamInterval: null,
+  streamBusy: false,
+  streamTimeout: null,
   wsAlerts: null,
   wsStream: null,
   lprVideoWs: null,
@@ -135,7 +137,7 @@ const App = {
   onViewChange(view) {
     if (view === 'dashboard') this.loadDashboard();
     if (view === 'lpr') { this.loadLprHistory(); this.loadLprModelStatus(); }
-    if (view === 'police') { this.loadPoliceGestures(); this.loadPoliceHistory(); }
+    if (view === 'police') { this.loadPolicePoseBackend(); this.loadPoliceGestures(); this.loadPoliceHistory(); }
     if (view === 'owner') { this.loadOwnerGestures(); this.loadVehicleState(); }
     if (view === 'alerts') { this.loadAlerts(); this.connectAlertWs(); }
     if (view === 'logs') this.loadLogs();
@@ -502,6 +504,38 @@ const App = {
     } catch (e) {}
   },
 
+  async loadPolicePoseBackend() {
+    try {
+      const data = await this.api('/api/police-gesture/pose-backend');
+      const select = document.getElementById('police-pose-backend');
+      const status = document.getElementById('police-pose-backend-status');
+      if (select) select.value = data.backend || 'ctpgr';
+      if (status) status.textContent = data.backend === 'yolo' ? 'YOLO experimental' : 'stable';
+    } catch (e) {}
+  },
+
+  async setPolicePoseBackend() {
+    const select = document.getElementById('police-pose-backend');
+    const status = document.getElementById('police-pose-backend-status');
+    const backend = select?.value || 'ctpgr';
+    this.stopStream();
+    if (status) status.textContent = 'switching...';
+    try {
+      const data = await this.api('/api/police-gesture/pose-backend', {
+        method: 'PUT',
+        body: JSON.stringify({ backend }),
+      });
+      if (select) select.value = data.backend;
+      if (status) status.textContent = data.backend === 'yolo' ? 'YOLO experimental' : 'stable';
+      const resultBox = document.getElementById('police-result');
+      if (resultBox) resultBox.innerHTML = `当前模型：${data.backend === 'yolo' ? 'YOLO-Pose' : 'CTPGR Pose'}`;
+    } catch (e) {
+      if (status) status.textContent = 'failed';
+      alert(e.message);
+      this.loadPolicePoseBackend();
+    }
+  },
+
   async loadPoliceHistory() {
     try {
       const data = await this.api('/api/police-gesture/history?limit=10');
@@ -592,11 +626,18 @@ const App = {
       this.wsStream = new WebSocket(`${proto}://${location.host}/ws/stream/${module}`);
       this.wsStream.onmessage = (e) => {
         const msg = JSON.parse(e.data);
+        this.streamBusy = false;
         if (msg.type === 'result') this.renderResult(module, msg.data);
+        if (msg.type === 'frame_error') {
+          const resultMap = { police: 'police-result', owner: 'owner-result' };
+          const resultBox = document.getElementById(resultMap[module]);
+          if (resultBox) resultBox.innerHTML = `识别失败：${msg.message}`;
+        }
       };
 
       this.streamInterval = setInterval(() => {
-        if (video.readyState >= 2 && this.wsStream?.readyState === WebSocket.OPEN) {
+        if (video.readyState >= 2 && this.wsStream?.readyState === WebSocket.OPEN && !this.streamBusy) {
+          this.streamBusy = true;
           canvas.width = video.videoWidth;
           canvas.height = video.videoHeight;
           ctx.drawImage(video, 0, 0);
@@ -605,6 +646,39 @@ const App = {
         }
       }, 500);
     } catch (e) { alert('无法访问摄像头: ' + e.message); }
+  },
+
+  startUrlStream(module) {
+    this.stopStream();
+    const input = document.getElementById(module + '-stream-url');
+    const url = (input?.value || '').trim();
+    if (!url) {
+      alert('请输入 rtsp/http 视频流地址');
+      return;
+    }
+
+    this.streamModule = module;
+    const resultMap = { lpr: 'lpr-results', police: 'police-result', owner: 'owner-result' };
+    const resultBox = document.getElementById(resultMap[module]);
+    if (resultBox) resultBox.innerHTML = '正在连接视频流...';
+
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    this.wsStream = new WebSocket(`${proto}://${location.host}/ws/stream-url/${module}`);
+    this.wsStream.onopen = () => {
+      this.wsStream.send(JSON.stringify({ type: 'start', url, interval: 1, target_fps: 15 }));
+    };
+    this.wsStream.onmessage = (e) => {
+      const msg = JSON.parse(e.data);
+      if (msg.type === 'status' && resultBox) resultBox.innerHTML = '视频流已连接，正在识别...';
+      if (msg.type === 'result') this.renderResult(module, msg.data);
+      if (msg.type === 'error') {
+        if (resultBox) resultBox.innerHTML = `视频流错误：${msg.message}`;
+        else alert(msg.message);
+      }
+    };
+    this.wsStream.onerror = () => {
+      if (resultBox) resultBox.innerHTML = '视频流连接失败';
+    };
   },
 
   clearLprDisplay() {
@@ -845,11 +919,13 @@ const App = {
 
   stopStream() {
     if (this.streamInterval) { clearInterval(this.streamInterval); this.streamInterval = null; }
+    if (this.streamTimeout) { clearTimeout(this.streamTimeout); this.streamTimeout = null; }
     if (this.wsStream) { this.wsStream.close(); this.wsStream = null; }
+    this.streamBusy = false;
     if (this.streamModule) {
       const video = document.getElementById(this.streamModule + '-video');
-      if (video.srcObject) { video.srcObject.getTracks().forEach(t => t.stop()); video.srcObject = null; }
-      video.hidden = true;
+      if (video?.srcObject) { video.srcObject.getTracks().forEach(t => t.stop()); video.srcObject = null; }
+      if (video) video.hidden = true;
       this.streamModule = null;
     }
   },

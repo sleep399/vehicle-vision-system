@@ -158,6 +158,18 @@
               <button class="btn" onclick="document.getElementById('police-file').click()">上传图片/视频</button>
               <button class="btn primary" onclick="App.startStream('police')">📹 实时识别</button>
               <button class="btn" onclick="App.stopStream()">停止</button>
+              <div class="stream-url-row">
+                <select id="police-pose-backend">
+                  <option value="ctpgr">CTPGR Pose</option>
+                  <option value="yolo">YOLO-Pose</option>
+                </select>
+                <button class="btn" onclick="App.setPolicePoseBackend()">切换模型</button>
+                <span id="police-pose-backend-status" style="color:var(--text-muted);align-self:center"></span>
+              </div>
+              <div class="stream-url-row">
+                <input type="text" id="police-stream-url" placeholder="rtsp://... 或 http://... 视频流地址">
+                <button class="btn" onclick="App.startUrlStream('police')">连接视频流</button>
+              </div>
               <video id="police-video" autoplay playsinline muted hidden></video>
               <canvas id="police-canvas" hidden></canvas>
               <div id="police-gesture-list" class="gesture-ref"></div>
