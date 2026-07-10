@@ -15,6 +15,7 @@
         <p class="subtitle">车牌识别 · 交警手势 · 车主控车 · 智能告警</p>
         <div class="tabs">
           <button class="tab active" data-tab="password">密码登录</button>
+          <button class="tab" data-tab="register">注册</button>
           <button class="tab" data-tab="code">验证码登录</button>
           <button class="tab" data-tab="wechat">微信扫码</button>
         </div>
@@ -22,6 +23,13 @@
           <input type="text" id="login-user" placeholder="用户名 (默认 admin)" value="admin">
           <input type="password" id="login-pass" placeholder="密码 (默认 admin123)" value="admin123">
           <button class="btn primary" onclick="App.login()">登录</button>
+        </div>
+        <div id="tab-register" class="tab-panel">
+          <input type="text" id="register-user" placeholder="用户名">
+          <input type="email" id="register-email" placeholder="邮箱（可选）">
+          <input type="tel" id="register-phone" placeholder="手机号（可选）">
+          <input type="password" id="register-pass" placeholder="密码">
+          <button class="btn primary" onclick="App.register()">注册并登录</button>
         </div>
         <div id="tab-code" class="tab-panel">
           <input type="text" id="code-target" placeholder="邮箱或手机号">

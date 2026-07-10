@@ -86,6 +86,26 @@ const App = {
     } catch (e) { alert(e.message); }
   },
 
+  async register() {
+    const username = document.getElementById('register-user').value.trim();
+    const password = document.getElementById('register-pass').value;
+    const email = document.getElementById('register-email').value.trim() || null;
+    const phone = document.getElementById('register-phone').value.trim() || null;
+    if (!username || !password) {
+      alert('请输入用户名和密码');
+      return;
+    }
+    try {
+      const data = await this.api('/api/auth/register', {
+        method: 'POST',
+        body: JSON.stringify({ username, password, email, phone }),
+      });
+      this.token = data.access_token;
+      localStorage.setItem('token', this.token);
+      this.showMain();
+    } catch (e) { alert(e.message); }
+  },
+
   async sendCode() {
     const target = document.getElementById('code-target').value;
     try {
