@@ -27,6 +27,13 @@ class YoloLprConfig:
     yolo_model: str
     lpr_model: str
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
+    yolo_conf: float = 0.3
+    yolo_iou: float = 0.5
+    yolo_imgsz: int = 1280
+    yolo_max_det: int = 20
+    min_box_width: int = 18
+    min_box_height: int = 8
+    max_aspect_ratio: float = 8.0
 
 
 def find_default_models() -> YoloLprConfig:
@@ -51,7 +58,16 @@ def find_default_models() -> YoloLprConfig:
 class YoloLprRuntime:
     def __init__(self, config: YoloLprConfig | None = None):
         self.config = config or find_default_models()
-        self.detector = YOLOPlateDetector(self.config.yolo_model)
+        self.detector = YOLOPlateDetector(
+            self.config.yolo_model,
+            conf_threshold=self.config.yolo_conf,
+            iou_threshold=self.config.yolo_iou,
+            imgsz=self.config.yolo_imgsz,
+            max_det=self.config.yolo_max_det,
+            min_box_width=self.config.min_box_width,
+            min_box_height=self.config.min_box_height,
+            max_aspect_ratio=self.config.max_aspect_ratio,
+        )
         self.recognizer = build_lprnet(lpr_max_len=8, phase=False, class_num=len(CHARS), dropout_rate=0.5)
         state = torch.load(self.config.lpr_model, map_location=self.config.device)
         self.recognizer.load_state_dict(state)

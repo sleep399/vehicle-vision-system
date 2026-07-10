@@ -43,7 +43,7 @@ class Settings(BaseSettings):
     low_confidence_threshold: float = 0.4
 
     class Config:
-        env_file = ".env"
+        env_file = str(BASE_DIR / ".env")
         extra = "ignore"
 
     @property
@@ -59,6 +59,12 @@ class Settings(BaseSettings):
     @property
     def data_dir(self) -> Path:
         p = self.base_dir / "data"
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+
+    @property
+    def hls_dir(self) -> Path:
+        p = self.base_dir / "hls"
         p.mkdir(parents=True, exist_ok=True)
         return p
 

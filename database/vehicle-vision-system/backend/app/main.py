@@ -8,6 +8,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
+from fastapi.responses import RedirectResponse
 from app.config import settings
 from app.database import init_db
 from app.models.user import User
@@ -70,6 +71,14 @@ if static_dir.exists():
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 uploads_dir = settings.upload_dir
 app.mount("/uploads", StaticFiles(directory=str(uploads_dir)), name="uploads")
+
+
+@app.get("/hls/{path_name}/index.m3u8", include_in_schema=False)
+async def hls_playlist(path_name: str):
+    hls_file = settings.hls_dir / path_name / "index.m3u8"
+    if hls_file.exists():
+        return FileResponse(str(hls_file))
+    return {"detail": "HLS playlist not found"}
 
 
 @app.get("/", include_in_schema=False)

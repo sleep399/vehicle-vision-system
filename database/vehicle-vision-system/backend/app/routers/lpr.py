@@ -3,7 +3,9 @@ import logging
 import re
 import uuid
 from pathlib import Path
-from fastapi import APIRouter, Depends, File, UploadFile, HTTPException, Query
+from urllib.parse import unquote, urlparse
+from fastapi import APIRouter, Depends, File, UploadFile, HTTPException, Query, Response
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.records import LicensePlateRecord
@@ -100,7 +102,7 @@ async def recognize_video(
             plate_number = (p.get("plate_number") or "").strip()
             confidence = float(p.get("confidence", 0.0))
             valid_format = bool(plate_number and PLATE_RE.match(plate_number))
-            valid_conf = confidence >= 0.65
+            valid_conf = confidence >= 0.35
             logger.info(
                 "[LPR-API] plate candidate frame=%s plate=%s conf=%.3f format=%s conf_ok=%s",
                 frame_index, plate_number or "<empty>", confidence, valid_format, valid_conf,
@@ -135,31 +137,30 @@ async def recognize_video(
         })
     logger.info("[LPR-API] video candidates=%s valid_records=%s", total_candidates, len(video_records))
     video_records.sort(key=lambda x: (x.get("hit_count", 0), x.get("max_confidence", 0)), reverse=True)
-    if video_records:
-        encrypted_plates = encrypt_json({"plates": video_records})
-        record = LicensePlateRecord(
-            user_id=user.id if user else None,
-            source_type="video",
-            image_path=str(save_path),
-            annotated_image=(summary.get("best", {}) or {}).get("annotated_image"),
-            plates_json=encrypted_plates,
-        )
-        db.add(record)
-        db.commit()
-        db.refresh(record)
-        record_id = record.id
-        logger.info("[LPR-API] video record saved id=%s plates=%s", record_id, len(video_records))
-        logger.info("[LPR-API] video plates=%s", ", ".join(
-            f"{x['plate_number']}@F{x['frame_index']} hit={x['hit_count']} avg={x['confidence']:.2f} max={x['max_confidence']:.2f}"
-            for x in video_records[:10]
-        ))
-    else:
-        logger.warning("[LPR-API] video record not saved: no valid plates passed filters")
+    if not video_records:
+        video_records = [{"plate_number": "未识别", "plate_color": "无", "confidence": 0.0, "max_confidence": 0.0, "hit_count": 0, "frames": [], "frame_index": None, "source": "yolo_lprnet"}]
+    encrypted_plates = encrypt_json({"plates": video_records})
+    record = LicensePlateRecord(
+        user_id=user.id if user else None,
+        source_type="video",
+        image_path=str(save_path),
+        annotated_image=(summary.get("best", {}) or {}).get("annotated_image"),
+        plates_json=encrypted_plates,
+    )
+    db.add(record)
+    db.commit()
+    db.refresh(record)
+    record_id = record.id
+    logger.info("[LPR-API] video record saved id=%s plates=%s", record_id, len(video_records))
+    logger.info("[LPR-API] video plates=%s", ", ".join(
+        f"{x['plate_number']}@F{x['frame_index']} hit={x['hit_count']} avg={x['confidence']:.2f} max={x['max_confidence']:.2f}"
+        for x in video_records[:10]
+    ))
 
     write_log(
         db, "lpr",
         f"视频识别完成，有效帧 {summary['frame_count']}/{summary['total_frames']}",
-        detail={"record_id": record_id, "engine": "yolo_lprnet"},
+        detail={"record_id": record_id, "engine": "yolo_lprnet", "plates": video_records},
         user_id=user.id if user else None,
     )
     annotated_video_path = summary.get("annotated_video_path")
@@ -177,6 +178,91 @@ async def recognize_video(
         "annotated_video_path": annotated_video_path,
         "annotated_video_url": annotated_video_url,
     }
+
+
+@router.get("/preview.mjpg", summary="获取实时预览流")
+def preview_mjpg() -> Response:
+    return Response(content=b"", media_type="multipart/x-mixed-replace; boundary=frame")
+
+
+@router.post("/rtsp/start", summary="启动沙盘 RTSP 车牌识别")
+async def recognize_rtsp_stream(
+    payload: dict,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    rtsp_url = (payload.get("rtsp_url") or "").strip()
+    if not rtsp_url:
+        raise HTTPException(400, "rtsp_url 不能为空")
+    source_name = (payload.get("source_name") or payload.get("source") or "live1").strip()
+    label = (payload.get("label") or "").strip()
+    status = lpr_video_service.model_status()
+    if not status.get("model_available"):
+        raise HTTPException(500, status.get("message") or "YOLO+LPRNet 模型未加载")
+
+    try:
+        parsed = urlparse(rtsp_url)
+        local_path = None
+        if parsed.scheme.lower() == 'file':
+            local_path = Path(unquote(parsed.path.lstrip('/')))
+        elif rtsp_url.lower().endswith(('.mp4', '.avi', '.mov', '.mkv', '.m4v')):
+            local_path = Path(rtsp_url)
+        if local_path is not None:
+            summary = lpr_video_service.start_video_file_stream(local_path, source_name=source_name)
+        else:
+            summary = lpr_video_service.start_rtsp_stream(rtsp_url=rtsp_url, source_name=source_name, label=label)
+    except Exception as e:
+        logger.exception("[LPR-API] rtsp start failed")
+        raise HTTPException(500, str(e))
+
+    write_log(
+        db,
+        "lpr",
+        f"启动沙盘 RTSP 识别: {label or source_name}",
+        detail={"rtsp_url": rtsp_url, "source": source_name, "dst_url": summary.get("dst_url")},
+        user_id=user.id if user else None,
+    )
+    return summary
+
+
+@router.get("/preview/{source_name}.mjpg", summary="车牌识别预览流")
+def preview_stream(source_name: str):
+    return StreamingResponse(
+        lpr_video_service.preview_frame_generator(source_name),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+    )
+
+
+@router.get("/preview/{source_name}/status", summary="车牌识别预览状态")
+def preview_status(source_name: str):
+    return lpr_video_service.preview_status(source_name)
+
+
+@router.post("/rtsp/stop", summary="停止沙盘 RTSP 车牌识别")
+async def stop_rtsp_stream(
+    payload: dict,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    rtsp_url = (payload.get("rtsp_url") or "").strip()
+    source_name = (payload.get("source_name") or payload.get("source") or "live1").strip()
+    if not rtsp_url and not source_name:
+        raise HTTPException(400, "rtsp_url 或 source_name 不能为空")
+    result = lpr_video_service.stop_rtsp_stream(rtsp_url=rtsp_url, source_name=source_name)
+    history = result.get("history") or {"plates": [{"plate_number": "未识别", "plate_color": "无", "confidence": 0.0, "max_confidence": 0.0, "hit_count": 0, "frames": [], "frame_index": None, "source": "yolo_lprnet"}]}
+    encrypted_plates = encrypt_json({"plates": history.get("plates", [])})
+    record = LicensePlateRecord(
+        user_id=user.id if user else None,
+        source_type="rtsp",
+        image_path=None,
+        annotated_image=None,
+        plates_json=encrypted_plates,
+    )
+    db.add(record)
+    db.commit()
+    db.refresh(record)
+    write_log(db, "lpr", f"停止沙盘 RTSP 识别: {rtsp_url or source_name}", detail={"record_id": record.id, "plates": history.get("plates", [])}, user_id=user.id if user else None)
+    return {**result, "record_id": record.id}
 
 
 @router.get("/model-status", summary="图片识别模型状态（RPNet/CCPD GT）")

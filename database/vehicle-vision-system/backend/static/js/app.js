@@ -8,6 +8,15 @@ const App = {
   lprVideoBusy: false,
   lprVideoTimer: null,
   lprVideoMode: null,
+  lprRtspTimer: null,
+  lprRtspBusy: false,
+  lprRtspWs: null,
+  lprRtspCapture: null,
+  lprRtspMode: null,
+  lprRtspStartedAt: null,
+  lprRtspSourceName: null,
+  lprRtspHls: null,
+  lprRtspRetryTimer: null,
 
   init() {
     this.bindTabs();
@@ -620,6 +629,104 @@ const App = {
     if (hero) hero.classList.add('hidden');
   },
 
+  syncLprRtspUrl() {
+    const urlInput = document.getElementById('lpr-rtsp-url');
+    const sourceSelect = document.getElementById('lpr-rtsp-source');
+    if (urlInput && sourceSelect?.value) urlInput.value = sourceSelect.value;
+  },
+
+  setRtspVideo(url) {
+    const video = document.getElementById('lpr-rtsp-video');
+    const player = document.getElementById('lpr-rtsp-player');
+    const debug = document.getElementById('lpr-rtsp-debug');
+    if (!video || !player || !url) return;
+    player.classList.remove('hidden');
+    if (debug) debug.textContent = `准备加载：${url}`;
+    video.src = url;
+    const update = (txt) => { if (debug) debug.textContent = txt; };
+    video.onload = () => update(`已加载：${url}`);
+    video.onerror = () => update(`预览错误：${video.error?.message || video.error?.code || 'unknown'}`);
+  },
+
+  async startLprRtspStream() {
+    this.stopVideoStream();
+    this.lprVideoMode = 'rtsp';
+    this.lprRtspMode = 'rtsp';
+    const urlInput = document.getElementById('lpr-rtsp-url');
+    const sourceSelect = document.getElementById('lpr-rtsp-source');
+    const rtspUrl = (urlInput?.value || '').trim();
+    const source = sourceSelect?.value || 'rtsp://10.126.59.120:8554/live/live1';
+    const presetLabel = sourceSelect?.selectedOptions?.[0]?.textContent?.trim() || '';
+    if (urlInput) urlInput.readOnly = false;
+    const statusEl = document.getElementById('lpr-rtsp-status');
+    const progress = document.getElementById('lpr-rtsp-progress');
+    const progressFill = document.getElementById('lpr-rtsp-progress-fill');
+    const progressText = document.getElementById('lpr-rtsp-progress-text');
+    const resultBox = document.getElementById('lpr-rtsp-result');
+    if (!rtspUrl) {
+      alert('请输入 RTSP 地址');
+      return;
+    }
+    if (statusEl) statusEl.textContent = `准备连接 ${presetLabel || source} · ${rtspUrl}`;
+    if (progress) progress.classList.remove('hidden');
+    if (progressFill) progressFill.style.width = '5%';
+    if (progressText) progressText.textContent = '正在建立 RTSP 识别连接…';
+    if (resultBox) resultBox.innerHTML = '<div class="result-banner"><div class="result-title">等待 RTSP 视频流…</div></div>';
+    this.lprRtspStartedAt = Date.now();
+    try {
+      const headers = { 'Content-Type': 'application/json' };
+      if (this.token) headers['Authorization'] = `Bearer ${this.token}`;
+      const localFile = /\.(mp4|avi|mov|mkv|m4v)$/i.test(rtspUrl) || /^(?:[a-zA-Z]:\\|file:\/\/)/.test(rtspUrl);
+      const payload = localFile
+        ? { rtsp_url: rtspUrl, source_name: source.split('/').pop() || 'live1', label: presetLabel || null }
+        : { rtsp_url: rtspUrl, source_name: source.split('/').pop() || 'live1', label: presetLabel || null };
+      const res = await fetch('/api/lpr/rtsp/start', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || 'RTSP 启动失败');
+      this.renderResult('lpr', data, { video: true, skipHistory: true });
+      const previewUrl = data.preview_url || '';
+      this.lprRtspSourceName = data.source_name || 'live1';
+      if (previewUrl) {
+        console.log('[RTSP] use preview url:', previewUrl);
+        this.setRtspVideo(previewUrl);
+        if (this.lprPreviewPoll) clearInterval(this.lprPreviewPoll);
+        this.lprPreviewPoll = setInterval(async () => {
+          try {
+            const status = await this.api(`/api/lpr/preview/${this.lprRtspSourceName}/status`);
+            const debug = document.getElementById('lpr-rtsp-debug');
+            const player = document.getElementById('lpr-rtsp-player');
+            if (debug) {
+              const names = (status.plates || []).map(p => p.plate_number).filter(Boolean).join('、') || '暂无';
+              debug.textContent = `帧 ${status.frame_index ?? 0} · 车牌 ${names}`;
+            }
+            if (player) player.classList.remove('hidden');
+            const plateTarget = document.getElementById('lpr-rtsp-result');
+            if (plateTarget) {
+              plateTarget.innerHTML = (status.plates || []).map(p => `<div class="plate-item"><span class="number">${this.formatPlateNumber(p.plate_number)}</span><span class="color ${this.plateColorClass(p.plate_color)}">${p.plate_color || '蓝牌'}</span><span class="history-meta" style="margin-left:.5rem">${((p.confidence || 0) * 100).toFixed(0)}%</span></div>`).join('') || '<p style="color:var(--text-muted)">未检测到车牌</p>';
+            }
+            if (!status.running && this.lprPreviewPoll) {
+              clearInterval(this.lprPreviewPoll);
+              this.lprPreviewPoll = null;
+            }
+          } catch (err) {
+            console.warn('[PREVIEW-STATUS]', err);
+          }
+        }, 1000);
+      }
+      if (statusEl) statusEl.textContent = data.message || `RTSP 识别已启动：${presetLabel || source}`;
+      if (progressText) progressText.textContent = 'RTSP 识别已启动，正在等待实时结果…';
+      if (progressFill) progressFill.style.width = '20%';
+    } catch (e) {
+      if (statusEl) statusEl.textContent = `RTSP 启动失败：${e.message}`;
+      if (resultBox) resultBox.innerHTML = `<div class="result-banner danger"><div class="result-title">RTSP 启动失败</div><div class="result-subtitle">${e.message}</div></div>`;
+      alert(e.message);
+    }
+  },
+
   async startVideoFileStream(file) {
     this.stopVideoStream();
     this.lprVideoMode = 'file';
@@ -819,11 +926,19 @@ const App = {
   },
 
 
-  stopVideoStream() {
+  async stopVideoStream() {
     if (this.lprVideoTimer) { clearInterval(this.lprVideoTimer); this.lprVideoTimer = null; }
     if (this.lprVideoWs) { this.lprVideoWs.close(); this.lprVideoWs = null; }
+    if (this.lprRtspTimer) { clearInterval(this.lprRtspTimer); this.lprRtspTimer = null; }
+    if (this.lprRtspWs) { this.lprRtspWs.close(); this.lprRtspWs = null; }
+    if (this.lprRtspCapture) { clearInterval(this.lprRtspCapture); this.lprRtspCapture = null; }
+    if (this.lprPreviewPoll) { clearInterval(this.lprPreviewPoll); this.lprPreviewPoll = null; }
     this.lprVideoBusy = false;
+    this.lprRtspBusy = false;
     this.lprVideoMode = null;
+    this.lprRtspMode = null;
+    const sourceName = this.lprRtspSourceName || 'live1';
+    this.lprRtspSourceName = null;
     this.setLprLoading(false);
     const fileVideo = document.getElementById('lpr-video-output');
     if (fileVideo) {
@@ -840,6 +955,27 @@ const App = {
       camVideo.srcObject = null;
     }
     if (camVideo) camVideo.hidden = true;
+    const rtspStatus = document.getElementById('lpr-rtsp-status');
+    const rtspProgress = document.getElementById('lpr-rtsp-progress');
+    const rtspResult = document.getElementById('lpr-rtsp-result');
+    if (rtspStatus) rtspStatus.textContent = '尚未启动 RTSP 识别';
+    if (rtspProgress) rtspProgress.classList.add('hidden');
+    if (rtspResult) rtspResult.innerHTML = '';
+    const rtspDebug = document.getElementById('lpr-rtsp-debug');
+    if (rtspDebug) rtspDebug.textContent = '预览未加载';
+    const rtspImg = document.getElementById('lpr-rtsp-video');
+    if (rtspImg) { rtspImg.removeAttribute('src'); rtspImg.src = ''; }
+    try {
+      const headers = { 'Content-Type': 'application/json' };
+      if (this.token) headers['Authorization'] = `Bearer ${this.token}`;
+      await fetch('/api/lpr/rtsp/stop', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ source_name: sourceName }),
+      });
+    } catch (e) {
+      console.warn('[STOP-RTSP]', e);
+    }
     this.stopStream();
   },
 
@@ -875,6 +1011,18 @@ const App = {
       this.showToast({ level: 'info', title: data.title, summary: data.summary });
       this.loadAlerts();
     } catch (e) { alert(e.message); }
+  },
+
+  captureAndSendLprFrame(video, canvas) {
+    if (this.lprRtspMode === 'rtsp') return;
+    if (!video || !canvas || video.readyState < 2 || this.lprVideoBusy || !this.lprVideoWs || this.lprVideoWs.readyState !== WebSocket.OPEN) return;
+    const ctx = canvas.getContext('2d');
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    const dataUrl = canvas.toDataURL('image/jpeg', 0.8);
+    this.lprVideoBusy = true;
+    this.lprVideoWs.send(JSON.stringify({ type: 'frame', data: dataUrl.split(',')[1] }));
   },
 
   async loadLogs() {

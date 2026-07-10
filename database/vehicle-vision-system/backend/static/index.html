@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>车载视觉感知与人机交互系统</title>
   <link rel="stylesheet" href="/static/css/style.css">
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
 </head>
 <body>
   <div id="app">
@@ -89,12 +90,38 @@
                 <p class="upload-hint">CCPD 文件名自动走 CCPD 识别，其它文件自动走 LPRNet 识别</p>
                 <button class="btn" onclick="document.getElementById('lpr-file').click()">选择文件</button>
               </div>
-              <div class="lpr-actions">
-                <button class="btn primary" onclick="App.startStream('lpr')">📹 摄像头实时识别</button>
-                <button class="btn" onclick="App.stopVideoStream()">停止视频/摄像头</button>
-                <button class="btn" onclick="App.loadCcpdSamples()">🧪 CCPD 测试样本</button>
+              <div class="panel" style="margin-top:1rem">
+                <h4>沙盘 RTSP 实时识别</h4>
+                <div class="row" style="align-items:center; gap:.75rem; flex-wrap:wrap">
+                  <input type="text" id="lpr-rtsp-url" placeholder="rtsp://10.126.59.120:8554/live/live1" value="rtsp://10.126.59.120:8554/live/live1" style="flex:1; min-width:260px">
+                  <select id="lpr-rtsp-source" onchange="App.syncLprRtspUrl()" style="width:220px">
+                    <option value="rtsp://10.126.59.120:8554/live/live1">桥面（live1）</option>
+                    <option value="rtsp://10.126.59.120:8554/live/live2">停车场出口（live2）</option>
+                    <option value="rtsp://10.126.59.120:8554/live/live3">行人检测（live3）</option>
+                    <option value="rtsp://10.126.59.120:8554/live/live4">消防车识别（live4）</option>
+                    <option value="rtsp://10.126.59.120:8554/live/live5">桥出口（live5）</option>
+                    <option value="rtsp://10.126.59.120:8554/live/live6">桥入口（live6）</option>
+                    <option value="rtsp://10.126.59.120:8554/live/live7">道路2（live7）</option>
+                    <option value="rtsp://10.126.59.120:8554/live/live8">隧道-事故识别（live8）</option>
+                    <option value="rtsp://10.126.59.120:8554/live/live9">隧道-车辆数量（live9）</option>
+                    <option value="rtsp://10.126.59.120:8554/live/live10">道路3（live10）</option>
+                    <option value="rtsp://10.126.59.120:8554/live/live11">停车场入口（live11）</option>
+                    <option value="rtsp://10.126.59.120:8554/live/live12">道路1（live12）</option>
+                  </select>
+                  <button class="btn primary" onclick="App.startLprRtspStream()">启动识别</button>
+                  <button class="btn" onclick="App.stopVideoStream()">停止</button>
+                </div>
+                <div id="lpr-rtsp-status" class="section-desc model-warn" style="margin-top:1rem">尚未启动 RTSP 识别</div>
+                <div id="lpr-rtsp-progress" class="video-progress hidden">
+                  <div class="video-progress-bar"><div id="lpr-rtsp-progress-fill"></div></div>
+                  <span id="lpr-rtsp-progress-text">等待连接…</span>
+                </div>
+                <div id="lpr-rtsp-result" class="results-box"></div>
               </div>
               <div class="source-preview-wrap">
+                <div id="lpr-rtsp-player" class="rtsp-player hidden">
+                  <div id="lpr-rtsp-debug" class="section-desc model-warn" style="margin-bottom:.5rem">预览未加载</div>
+                </div>
                 <video id="lpr-video-output" class="source-video" controls playsinline muted hidden></video>
                 <canvas id="lpr-canvas" hidden></canvas>
               </div>

@@ -265,10 +265,29 @@ h2 {
   display: block;
   width: 100%;
   min-height: 220px;
+  margin-top: 1rem;
   margin-bottom: .75rem;
   border-radius: 8px;
   overflow: hidden;
   background: #0a0e17;
+}
+.rtsp-player {
+  position: relative;
+  width: 100%;
+  min-height: 300px;
+  margin-top: 1rem;
+  padding: .75rem;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  clear: both;
+}
+.rtsp-player video {
+  width: 100%;
+  min-height: 260px;
+  background: #000;
+  border-radius: 8px;
+  display: block;
 }
 .source-preview-wrap .source-video,
 .source-preview-wrap #lpr-canvas {
