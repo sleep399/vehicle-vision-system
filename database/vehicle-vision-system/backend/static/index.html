@@ -176,6 +176,10 @@
             </div>
             <div class="panel">
               <img id="police-preview" class="preview-img" alt="手势预览">
+              <video id="police-upload-preview" class="preview-img" controls hidden></video>
+              <div id="police-upload-controls" class="video-control-row" hidden>
+                <button id="police-upload-play" class="btn primary" onclick="App.toggleUploadedPolicePlayback()">播放视频</button>
+              </div>
               <div id="police-result" class="gesture-result"></div>
               <div id="police-history" class="history-list"></div>
             </div>

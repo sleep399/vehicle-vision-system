@@ -96,7 +96,14 @@ async def ws_stream(websocket: WebSocket, module: str):
                     result.get("model_available"),
                 )
                 frame_index += 1
-                await websocket.send_json({"type": "result", "module": module, "data": result})
+                await websocket.send_json(
+                    {
+                        "type": "result",
+                        "module": module,
+                        "time_sec": msg.get("time_sec"),
+                        "data": result,
+                    }
+                )
             elif msg.get("type") == "end":
                 await websocket.send_json({"type": "done", "module": module, "frames": frame_index})
                 break

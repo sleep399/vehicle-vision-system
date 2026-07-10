@@ -10,6 +10,7 @@ const App = {
   lprVideoBusy: false,
   lprVideoTimer: null,
   lprVideoMode: null,
+  uploadedRecognitionResults: [],
 
   init() {
     this.bindTabs();
@@ -294,12 +295,22 @@ const App = {
   async uploadFile(module, file, options = {}) {
     if (!file) return;
     if (module === 'lpr') this.clearLprDisplay();
+    const isVideo = this.isVideoFile(file);
     const endpoints = { lpr: '/api/lpr/recognize', police: '/api/police-gesture/recognize', owner: '/api/owner-gesture/recognize' };
     const previewMap = { lpr: 'lpr-preview', police: 'police-preview', owner: 'owner-preview' };
     const resultMap = { lpr: 'lpr-results', police: 'police-result', owner: 'owner-result' };
     const preview = document.getElementById(previewMap[module]);
     const resultBox = document.getElementById(resultMap[module]);
-    if (preview && file.type.startsWith('image/')) preview.src = URL.createObjectURL(file);
+    if (module === 'police') {
+      this.showPoliceUploadPreview(file, isVideo);
+      if (isVideo) {
+        if (resultBox) resultBox.innerHTML = '播放视频后开始实时识别...';
+        this.startUploadedPoliceVideo();
+        return;
+      }
+    } else if (preview && file.type.startsWith('image/')) {
+      preview.src = URL.createObjectURL(file);
+    }
     if (resultBox) resultBox.innerHTML = '<div class="result-banner"><div class="result-title">正在识别，请稍候…</div></div>';
     if (module === 'lpr') this.setLprLoading(true);
 
@@ -331,6 +342,178 @@ const App = {
     } finally {
       if (module === 'lpr') this.setLprLoading(false);
     }
+  },
+
+  showPoliceUploadPreview(file, isVideo) {
+    const imagePreview = document.getElementById('police-preview');
+    const videoPreview = document.getElementById('police-upload-preview');
+    const controls = document.getElementById('police-upload-controls');
+    const playButton = document.getElementById('police-upload-play');
+    const url = URL.createObjectURL(file);
+    if (isVideo) {
+      if (videoPreview) {
+        videoPreview.pause();
+        videoPreview.src = url;
+        videoPreview.preload = 'auto';
+        videoPreview.playsInline = true;
+        videoPreview.controls = true;
+        videoPreview.hidden = false;
+        videoPreview.load();
+      }
+      if (controls) controls.hidden = false;
+      if (playButton) playButton.textContent = '播放视频';
+      if (imagePreview) {
+        imagePreview.removeAttribute('src');
+        imagePreview.hidden = true;
+      }
+      return;
+    }
+
+    if (videoPreview) {
+      videoPreview.pause();
+      videoPreview.removeAttribute('src');
+      videoPreview.hidden = true;
+    }
+    if (controls) controls.hidden = true;
+    if (imagePreview) {
+      imagePreview.src = url;
+      imagePreview.hidden = false;
+    }
+  },
+
+  showAnnotatedPreview(module, base64Image) {
+    const imagePreview = document.getElementById(module + '-preview');
+    if (!imagePreview || !base64Image) return;
+    imagePreview.src = 'data:image/jpeg;base64,' + base64Image;
+    imagePreview.hidden = false;
+  },
+
+  async toggleUploadedPolicePlayback() {
+    const video = document.getElementById('police-upload-preview');
+    const button = document.getElementById('police-upload-play');
+    const resultBox = document.getElementById('police-result');
+    if (!video || video.hidden || !video.src) return;
+    try {
+      if (video.paused || video.ended) {
+        if (video.ended) video.currentTime = 0;
+        await video.play();
+      } else {
+        video.pause();
+      }
+    } catch (e) {
+      if (resultBox) resultBox.innerHTML = `视频播放失败：${e.message || e}`;
+    } finally {
+      if (button) button.textContent = video.paused ? '播放视频' : '暂停视频';
+    }
+  },
+
+  startUploadedPoliceVideo() {
+    this.stopStream();
+    const video = document.getElementById('police-upload-preview');
+    const canvas = document.getElementById('police-canvas');
+    const resultBox = document.getElementById('police-result');
+    if (!video || !canvas) return;
+    if (resultBox) resultBox.innerHTML = '播放视频后开始实时识别...';
+
+    this.streamModule = 'police';
+    this.streamBusy = false;
+    this.uploadedRecognitionResults = [];
+    const ctx = canvas.getContext('2d');
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    this.wsStream = new WebSocket(`${proto}://${location.host}/ws/stream/police`);
+    const sampleFps = 15;
+    const sampleMs = 1000 / sampleFps;
+    let processedFrames = 0;
+    let lastSentAt = 0;
+    let lastResultAt = -1;
+    let waitingForFirstPlay = true;
+
+    const renderSynchronizedResult = (row) => {
+      if (!resultBox || !row) return;
+      if (row.annotated_image) this.showAnnotatedPreview('police', row.annotated_image);
+      const now = Number.isFinite(video.currentTime) ? video.currentTime : row.time_sec;
+      const lag = Math.max(0, now - row.time_sec);
+      resultBox.innerHTML = `${row.gesture_cn}<br><small>置信度 ${(row.confidence * 100).toFixed(0)}%</small><br><small>video ${now.toFixed(1)}s / label ${row.time_sec.toFixed(1)}s / lag ${lag.toFixed(1)}s</small>`;
+    };
+
+    const updateStatus = () => {
+      if (!resultBox) return;
+      const duration = Number.isFinite(video.duration) ? video.duration : 0;
+      const current = Number.isFinite(video.currentTime) ? video.currentTime : 0;
+      resultBox.dataset.status = `sampled ${processedFrames} frames`;
+      if (!this.uploadedRecognitionResults.length) {
+        const status = waitingForFirstPlay ? '等待播放视频...' : `实时识别中，最高 ${sampleFps} FPS...`;
+        resultBox.innerHTML = `${status}<br><small>${current.toFixed(1)}s / ${duration ? duration.toFixed(1) : '?'}s</small>`;
+      }
+    };
+
+    const sendCurrentFrame = () => {
+      if (!this.streamModule || this.wsStream?.readyState !== WebSocket.OPEN) return;
+      if (video.paused || video.ended || video.readyState < 2 || this.streamBusy) return;
+      const timeSec = Number.isFinite(video.currentTime) ? video.currentTime : 0;
+      if (timeSec <= lastResultAt && processedFrames > 0) return;
+      this.streamBusy = true;
+      updateStatus();
+      canvas.width = video.videoWidth || 512;
+      canvas.height = video.videoHeight || 512;
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const dataUrl = canvas.toDataURL('image/jpeg', 0.72);
+      this.wsStream.send(JSON.stringify({ type: 'frame', data: dataUrl.split(',')[1], time_sec: timeSec }));
+      this.streamTimeout = setTimeout(() => {
+        this.streamBusy = false;
+      }, 5000);
+    };
+
+    const tick = () => {
+      if (!this.streamModule) return;
+      const now = performance.now();
+      if (now - lastSentAt >= sampleMs) {
+        lastSentAt = now;
+        sendCurrentFrame();
+      }
+      if (!video.paused && !video.ended) updateStatus();
+    };
+
+    this.wsStream.onopen = () => {
+      video.onplay = () => {
+        waitingForFirstPlay = false;
+        const button = document.getElementById('police-upload-play');
+        if (button) button.textContent = '暂停视频';
+        updateStatus();
+      };
+      video.onpause = () => {
+        const button = document.getElementById('police-upload-play');
+        if (button) button.textContent = '播放视频';
+        if (resultBox) resultBox.dataset.status = 'paused';
+      };
+      video.onseeked = () => { lastResultAt = -1; updateStatus(); };
+      this.streamInterval = setInterval(tick, 40);
+      updateStatus();
+    };
+
+    this.wsStream.onmessage = (e) => {
+      if (this.streamTimeout) {
+        clearTimeout(this.streamTimeout);
+        this.streamTimeout = null;
+      }
+      this.streamBusy = false;
+      const msg = JSON.parse(e.data);
+      if (msg.type === 'result') {
+        processedFrames += 1;
+        const row = { ...msg.data, time_sec: Number(msg.time_sec ?? video.currentTime ?? 0) };
+        lastResultAt = row.time_sec;
+        this.uploadedRecognitionResults.push(row);
+        renderSynchronizedResult(row);
+        this.loadPoliceHistory();
+      }
+      if (msg.type === 'frame_error' && resultBox) {
+        resultBox.innerHTML = `视频帧识别失败：${msg.message}`;
+      }
+    };
+
+    this.wsStream.onerror = () => {
+      if (resultBox) resultBox.innerHTML = '实时视频识别连接失败';
+    };
   },
 
   renderResult(module, data, opts = {}) {
@@ -587,6 +770,83 @@ const App = {
     this.updateVehicle();
   },
 
+  async ensurePoliceCameraSelector() {
+    if (document.getElementById('police-camera-device')) return;
+    const streamUrlRow = document.getElementById('police-stream-url')?.closest('.stream-url-row');
+    if (!streamUrlRow) return;
+    const row = document.createElement('div');
+    row.className = 'camera-device-row';
+    row.innerHTML = `
+      <select id="police-camera-device">
+        <option value="">默认摄像头</option>
+      </select>
+      <button class="btn" type="button" onclick="App.refreshPoliceCameraDevices()">刷新摄像头</button>
+    `;
+    streamUrlRow.parentNode.insertBefore(row, streamUrlRow);
+    await this.refreshPoliceCameraDevices();
+  },
+
+  async refreshPoliceCameraDevices() {
+    const select = document.getElementById('police-camera-device');
+    if (!select || !navigator.mediaDevices?.enumerateDevices) return;
+    const current = select.value;
+    const devices = await navigator.mediaDevices.enumerateDevices().catch(() => []);
+    const cameras = devices.filter(d => d.kind === 'videoinput');
+    select.innerHTML = '<option value="">默认摄像头</option>' + cameras.map((d, i) =>
+      `<option value="${d.deviceId}">${d.label || `摄像头 ${i + 1}`}</option>`
+    ).join('');
+    if (current && cameras.some(d => d.deviceId === current)) select.value = current;
+  },
+
+  cameraErrorMessage(error) {
+    const name = error?.name || '';
+    const detail = error?.message || String(error || '');
+    if (name === 'NotAllowedError' || name === 'PermissionDeniedError') {
+      return '浏览器没有摄像头权限，请在地址栏左侧允许摄像头权限后刷新页面。';
+    }
+    if (name === 'NotFoundError' || name === 'DevicesNotFoundError') {
+      return '没有找到可用摄像头，请确认摄像头已连接并被系统识别。';
+    }
+    if (name === 'NotReadableError' || /Could not start video source/i.test(detail)) {
+      return '摄像头无法启动，通常是被微信、腾讯会议、系统相机、浏览器其它标签页占用了。请关闭占用摄像头的软件后重试。';
+    }
+    if (name === 'OverconstrainedError' || name === 'ConstraintNotSatisfiedError') {
+      return '当前摄像头不支持请求的分辨率或帧率，已尝试降级仍失败。';
+    }
+    if (!window.isSecureContext) {
+      return '当前页面不是安全上下文。请使用 localhost、127.0.0.1 或 https 访问。';
+    }
+    return `无法访问摄像头：${detail}`;
+  },
+
+  async openPoliceCameraStream() {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      throw new Error('当前浏览器不支持 getUserMedia 摄像头接口');
+    }
+    await this.ensurePoliceCameraSelector();
+    const selectedDevice = document.getElementById('police-camera-device')?.value || '';
+    const baseVideo = {
+      width: { ideal: 640 },
+      height: { ideal: 480 },
+      frameRate: { ideal: 15, max: 15 },
+    };
+    const attempts = [];
+    if (selectedDevice) attempts.push({ video: { ...baseVideo, deviceId: { exact: selectedDevice } }, audio: false });
+    attempts.push({ video: { ...baseVideo, facingMode: { ideal: 'environment' } }, audio: false });
+    attempts.push({ video: baseVideo, audio: false });
+    attempts.push({ video: true, audio: false });
+
+    let lastError = null;
+    for (const constraints of attempts) {
+      try {
+        return await navigator.mediaDevices.getUserMedia(constraints);
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    throw lastError || new Error('摄像头启动失败');
+  },
+
   async startStream(module) {
     if (module === 'lpr') {
       this.stopVideoStream();
@@ -614,10 +874,16 @@ const App = {
     const video = document.getElementById(module + '-video');
     const canvas = document.getElementById(module + '-canvas');
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+      const stream = module === 'police'
+        ? await this.openPoliceCameraStream()
+        : await navigator.mediaDevices.getUserMedia({ video: true });
       video.srcObject = stream;
+      video.muted = true;
+      video.playsInline = true;
       video.hidden = false;
       canvas.hidden = true;
+      await video.play().catch(() => {});
+      if (module === 'police') await this.refreshPoliceCameraDevices();
       const ctx = canvas.getContext('2d');
       const statusEl = document.getElementById('lpr-video-model-status');
       if (statusEl) statusEl.textContent = '摄像头已打开，等待识别结果…';
@@ -645,7 +911,14 @@ const App = {
           this.wsStream.send(JSON.stringify({ type: 'frame', data: dataUrl.split(',')[1] }));
         }
       }, 500);
-    } catch (e) { alert('无法访问摄像头: ' + e.message); }
+    } catch (e) {
+      this.stopStream();
+      const message = module === 'police' ? this.cameraErrorMessage(e) : ('无法访问摄像头: ' + e.message);
+      const resultMap = { police: 'police-result', owner: 'owner-result' };
+      const resultBox = document.getElementById(resultMap[module]);
+      if (resultBox) resultBox.innerHTML = message;
+      alert(message);
+    }
   },
 
   startUrlStream(module) {
@@ -922,6 +1195,10 @@ const App = {
     if (this.streamTimeout) { clearTimeout(this.streamTimeout); this.streamTimeout = null; }
     if (this.wsStream) { this.wsStream.close(); this.wsStream = null; }
     this.streamBusy = false;
+    const uploadVideo = document.getElementById('police-upload-preview');
+    if (uploadVideo && !uploadVideo.hidden) uploadVideo.pause();
+    const uploadPlay = document.getElementById('police-upload-play');
+    if (uploadPlay) uploadPlay.textContent = '播放视频';
     if (this.streamModule) {
       const video = document.getElementById(this.streamModule + '-video');
       if (video?.srcObject) { video.srcObject.getTracks().forEach(t => t.stop()); video.srcObject = null; }
