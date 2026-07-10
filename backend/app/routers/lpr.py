@@ -8,9 +8,9 @@ from app.models.records import LicensePlateRecord
 from app.schemas import LPRResponse
 from app.services.lpr_service import lpr_service
 from app.services.alert_agent import alert_agent
-from app.utils.auth import get_current_user, current_user_optional
+from app.utils.auth import get_current_user
 from app.utils.crypto import encrypt_json, decrypt_json
-from app.utils.logger import write_log, log_exception, get_logger, localize_utc
+from app.utils.logger import write_log
 from app.config import settings
 
 router = APIRouter(prefix="/api/lpr", tags=["车牌识别"])
@@ -20,20 +20,16 @@ router = APIRouter(prefix="/api/lpr", tags=["车牌识别"])
 async def recognize_image(
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
-    user=Depends(current_user_optional),
+    user=Depends(get_current_user),
 ):
     content = await file.read()
     filename = file.filename or ""
     try:
         result = lpr_service.recognize(content, filename)
-    except FileNotFoundError as e:
-        await alert_agent.handle_model_load_failure(db, "fh02.pth", e)
-        log_exception(db, "lpr", f"模型加载失败: {filename}", e, user_id=user.id if user else None)
-        raise HTTPException(500, str(e))
     except Exception as e:
         alert_agent.record_lpr_result(False)
         await alert_agent.check_and_alert(db, "lpr")
-        log_exception(db, "lpr", f"车牌识别失败: {filename}", e, user_id=user.id if user else None)
+        write_log(db, "lpr", f"识别失败: {e}", level="ERROR", user_id=user.id if user else None)
         raise HTTPException(500, str(e))
 
     alert_agent.record_lpr_result(result["success"])
@@ -56,14 +52,7 @@ async def recognize_image(
     db.commit()
     db.refresh(record)
 
-    log_level = "INFO" if result["success"] and result["plate_count"] > 0 else "WARN"
-    write_log(
-        db, "lpr",
-        f"识别到 {result['plate_count']} 个车牌" if result["plate_count"] > 0 else "车牌识别未检测到有效车牌",
-        level=log_level,
-        detail={"plates": result["plates"], "success": result["success"]},
-        user_id=user.id if user else None,
-    )
+    write_log(db, "lpr", f"识别到 {result['plate_count']} 个车牌", detail={"plates": result["plates"]}, user_id=user.id if user else None)
     return LPRResponse(**result, record_id=record.id)
 
 
@@ -72,7 +61,7 @@ async def recognize_video(
     file: UploadFile = File(...),
     interval: int = Query(15, ge=1, le=60),
     db: Session = Depends(get_db),
-    user=Depends(current_user_optional),
+    user=Depends(get_current_user),
 ):
     content = await file.read()
     save_path = settings.upload_dir / "lpr" / f"{uuid.uuid4().hex}.mp4"
@@ -80,19 +69,7 @@ async def recognize_video(
     save_path.write_bytes(content)
 
     results = lpr_service.process_video(save_path, sample_interval=interval)
-    fail_count = sum(1 for r in results if not r.get("success") or r.get("plate_count", 0) == 0)
-    for _ in range(fail_count):
-        alert_agent.record_lpr_result(False)
-    for _ in range(len(results) - fail_count):
-        alert_agent.record_lpr_result(True)
-    await alert_agent.check_and_alert(db, "lpr")
-    write_log(
-        db, "lpr",
-        f"视频识别完成，有效帧 {len(results)}，失败帧 {fail_count}",
-        level="WARN" if fail_count > len(results) // 2 else "INFO",
-        detail={"frame_count": len(results), "fail_count": fail_count},
-        user_id=user.id if user else None,
-    )
+    write_log(db, "lpr", f"视频识别完成，有效帧 {len(results)}", user_id=user.id if user else None)
     return {"frame_count": len(results), "results": results}
 
 
@@ -101,7 +78,7 @@ def history(
     skip: int = 0,
     limit: int = 20,
     db: Session = Depends(get_db),
-    user=Depends(current_user_optional),
+    user=Depends(get_current_user),
 ):
     q = db.query(LicensePlateRecord).order_by(LicensePlateRecord.created_at.desc())
     if user:
@@ -113,7 +90,7 @@ def history(
             "source_type": r.source_type,
             "plate_count": len(decrypt_json(r.plates_json).get("plates", [])) if r.plates_json else 0,
             "annotated_image": r.annotated_image,
-            "created_at": localize_utc(r.created_at),
+            "created_at": r.created_at.isoformat(),
         }
         for r in records
     ]

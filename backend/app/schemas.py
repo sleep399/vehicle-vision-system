@@ -73,12 +73,7 @@ class AlertResponse(BaseModel):
     summary: str
     root_cause: Optional[str]
     suggestion: Optional[str]
-    channels: Optional[str] = None
-    detail: Optional[dict] = None
-    system_health: Optional[dict] = None
     status: str
-    resolution_note: Optional[str] = None
-    resolved_at: Optional[datetime] = None
     created_at: datetime
 
     class Config:

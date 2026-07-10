@@ -10,16 +10,10 @@ import uvicorn
 from app.config import settings
 
 if __name__ == "__main__":
-    llm_hint = (
-        f"LLM: {settings.llm_provider_label} ({settings.effective_llm_model}) ✓"
-        if settings.llm_configured
-        else "LLM: 未配置 API Key，告警摘要将使用模板模式"
-    )
     print(f"\n{'='*50}")
     print(f"  {settings.app_name}")
     print(f"  Web 界面: http://localhost:{settings.port}")
     print(f"  API 文档: http://localhost:{settings.port}/api/docs")
     print(f"  默认账号: admin / admin123")
-    print(f"  {llm_hint}")
     print(f"{'='*50}\n")
     uvicorn.run("app.main:app", host=settings.host, port=settings.port, reload=settings.debug)

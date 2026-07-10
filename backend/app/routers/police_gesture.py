@@ -6,8 +6,8 @@ from app.models.records import PoliceGestureRecord
 from app.schemas import GestureResponse
 from app.services.police_gesture_service import police_gesture_service
 from app.services.alert_agent import alert_agent
-from app.utils.auth import get_current_user, current_user_optional
-from app.utils.logger import write_log, log_exception, get_logger, localize_utc
+from app.utils.auth import get_current_user
+from app.utils.logger import write_log
 from app.config import settings
 import json
 
@@ -23,15 +23,8 @@ async def recognize(
     content = await file.read()
     try:
         result = police_gesture_service.recognize(content)
-    except FileNotFoundError as e:
-        await alert_agent.handle_model_load_failure(db, "pose_landmarker_lite.task", e)
-        log_exception(db, "police_gesture", "交警手势模型加载失败", e, user_id=user.id if user else None)
-        raise HTTPException(500, str(e))
     except Exception as e:
         write_log(db, "police_gesture", f"识别失败: {e}", level="ERROR", user_id=user.id if user else None)
-        log_exception(db, "police_gesture", "交警手势识别失败", e, user_id=user.id if user else None)
-        alert_agent.record_gesture_failure("police")
-        await alert_agent.check_and_alert(db, "police")
         raise HTTPException(500, str(e))
 
     alert_agent.record_gesture_confidence("police", result["confidence"])
@@ -56,14 +49,6 @@ async def recognize(
     db.refresh(record)
 
     write_log(db, "police_gesture", f"识别手势: {result['gesture_cn']} ({result['confidence']:.0%})", user_id=user.id if user else None)
-    log_level = "INFO" if result["confidence"] >= 0.4 else "WARN"
-    write_log(
-        db, "police_gesture",
-        f"识别手势: {result['gesture_cn']} ({result['confidence']:.0%})",
-        level=log_level,
-        detail={"gesture": result["gesture"], "confidence": result["confidence"]},
-        user_id=user.id if user else None,
-    )
     return GestureResponse(**{k: v for k, v in result.items() if k != "gesture_id"}, record_id=record.id)
 
 
@@ -84,7 +69,6 @@ def history(skip: int = 0, limit: int = 20, db: Session = Depends(get_db)):
             "confidence": r.confidence,
             "annotated_image": r.annotated_image,
             "created_at": r.created_at.isoformat(),
-            "created_at": localize_utc(r.created_at),
         }
         for r in records
     ]

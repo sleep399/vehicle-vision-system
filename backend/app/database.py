@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine, text, inspect
+from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, DeclarativeBase
 
 from app.config import settings
@@ -26,41 +26,9 @@ class Base(DeclarativeBase):
 
 
 def get_db():
-    from app.services.alert_agent import alert_agent
-
     db = SessionLocal()
     try:
-        db.execute(text("SELECT 1"))
-        alert_agent.record_db_connection(True)
         yield db
-    except Exception:
-        alert_agent.record_db_connection(False)
-        raise
-    finally:
-        db.close()
-
-
-def _migrate_schema():
-    """为已有数据库补充新增列（SQLite 兼容）"""
-    insp = inspect(engine)
-    if "alert_events" not in insp.get_table_names():
-        return
-    existing = {c["name"] for c in insp.get_columns("alert_events")}
-    with engine.begin() as conn:
-        if "system_health_json" not in existing:
-            conn.execute(text("ALTER TABLE alert_events ADD COLUMN system_health_json TEXT"))
-        if "resolution_note" not in existing:
-            conn.execute(text("ALTER TABLE alert_events ADD COLUMN resolution_note TEXT"))
-
-
-def check_db_connection() -> bool:
-    """检测数据库连接是否可用"""
-    db = SessionLocal()
-    try:
-        db.execute(text("SELECT 1"))
-        return True
-    except Exception:
-        return False
     finally:
         db.close()
 
@@ -69,4 +37,3 @@ def init_db():
     from app.models import user, records, logs, alerts  # noqa: F401
 
     Base.metadata.create_all(bind=engine)
-    _migrate_schema()
