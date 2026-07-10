@@ -11,6 +11,8 @@ const App = {
   lprVideoTimer: null,
   lprVideoMode: null,
   uploadedRecognitionResults: [],
+  policeHistoryLastSaved: {},
+  policeHistorySaveGapMs: 3000,
 
   init() {
     this.bindTabs();
@@ -34,6 +36,40 @@ const App = {
       throw new Error(err.detail || '请求失败');
     }
     return res.json();
+  },
+
+  shouldSavePoliceHistory(data) {
+    const gesture = data?.gesture || 'no_gesture';
+    const now = Date.now();
+    const last = this.policeHistoryLastSaved[gesture] || 0;
+    const previousGesture = this.policeHistoryLastSaved._lastGesture;
+    if (gesture !== previousGesture || now - last >= this.policeHistorySaveGapMs) {
+      this.policeHistoryLastSaved[gesture] = now;
+      this.policeHistoryLastSaved._lastGesture = gesture;
+      return true;
+    }
+    return false;
+  },
+
+  async savePoliceHistoryRecord(data, sourceType = 'stream') {
+    if (!data || !this.shouldSavePoliceHistory(data)) return;
+    try {
+      await this.api('/api/police-gesture/history', {
+        method: 'POST',
+        body: JSON.stringify({
+          source_type: sourceType,
+          gesture_id: data.gesture_id,
+          gesture: data.gesture || 'no_gesture',
+          gesture_cn: data.gesture_cn || '无手势',
+          confidence: data.confidence ?? 0,
+          keypoints: data.keypoints || [],
+          annotated_image: data.annotated_image || null,
+        }),
+      });
+      this.loadPoliceHistory();
+    } catch (e) {
+      console.warn('[POLICE] history save failed', e);
+    }
   },
 
   bindTabs() {
@@ -529,7 +565,7 @@ const App = {
         lastResultAt = row.time_sec;
         this.uploadedRecognitionResults.push(row);
         renderSynchronizedResult(row);
-        this.loadPoliceHistory();
+        this.savePoliceHistoryRecord(row, 'video');
       }
       if (msg.type === 'frame_error' && resultBox) {
         resultBox.innerHTML = `视频帧识别失败：${msg.message}`;
@@ -746,10 +782,17 @@ const App = {
 
   async loadPoliceHistory() {
     try {
-      const data = await this.api('/api/police-gesture/history?limit=10');
-      document.getElementById('police-history').innerHTML = data.map(r =>
-        `<div class="history-item"><span>${r.gesture_cn}</span><span>${(r.confidence*100).toFixed(0)}%</span></div>`
-      ).join('');
+      const data = await this.api('/api/police-gesture/history?limit=20');
+      document.getElementById('police-history').innerHTML = data.map(r => {
+        const source = { image: '图片', video: '视频', camera: '摄像头', stream: '视频流' }[r.source_type] || r.source_type || '识别';
+        return `<div class="history-item">
+          <div>
+            <span>${r.gesture_cn}</span>
+            <div class="history-meta">#${r.id} · ${source} · ${new Date(r.created_at).toLocaleString()}</div>
+          </div>
+          <span class="history-meta">${(r.confidence*100).toFixed(0)}%</span>
+        </div>`;
+      }).join('') || '<p style="color:var(--text-muted)">暂无记录</p>';
     } catch (e) {}
   },
 
@@ -923,7 +966,10 @@ const App = {
       this.wsStream.onmessage = (e) => {
         const msg = JSON.parse(e.data);
         this.streamBusy = false;
-        if (msg.type === 'result') this.renderResult(module, msg.data);
+        if (msg.type === 'result') {
+          this.renderResult(module, msg.data);
+          if (module === 'police') this.savePoliceHistoryRecord(msg.data, 'camera');
+        }
         if (msg.type === 'frame_error') {
           const resultMap = { police: 'police-result', owner: 'owner-result' };
           const resultBox = document.getElementById(resultMap[module]);
@@ -989,6 +1035,7 @@ const App = {
           streamPreview.hidden = false;
         }
         this.renderResult(module, msg.data);
+        if (module === 'police') this.savePoliceHistoryRecord(msg.data, 'stream');
       }
       if (msg.type === 'error') {
         if (resultBox) resultBox.innerHTML = `视频流错误：${msg.message}`;
