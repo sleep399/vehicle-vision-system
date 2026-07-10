@@ -365,3 +365,72 @@ h2 {
 
 .model-ok { color: #4ade80 !important; }
 .model-warn { color: #facc15 !important; }
+
+/* Police gesture page mirrors the LPR workflow layout */
+.police-layout { grid-template-columns: minmax(360px, .95fr) minmax(0, 1.05fr); }
+.police-input-panel,
+.police-result-panel { max-width: 100%; }
+.police-input-panel .stream-url-row,
+.police-input-panel .camera-device-row {
+  display: flex;
+  gap: .5rem;
+  flex-wrap: wrap;
+  align-items: center;
+  margin-bottom: .75rem;
+}
+.police-input-panel select,
+.police-input-panel input[type="text"],
+.police-input-panel .camera-device-row select {
+  min-height: 40px;
+  padding: .55rem .7rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+}
+.police-input-panel input[type="text"] { flex: 1 1 240px; min-width: 0; }
+.police-input-panel .gesture-ref { margin-top: .75rem; }
+.police-camera-wrap { min-height: 220px; }
+.police-camera-wrap #police-video,
+.police-camera-wrap #police-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.police-preview-wrap .preview-img,
+.police-upload-wrap .preview-img {
+  margin-bottom: 0;
+  width: 100%;
+  max-height: 240px;
+  min-height: 160px;
+  object-fit: contain;
+  background: #0a0e17;
+  border-radius: 8px;
+}
+.police-preview-wrap,
+.police-upload-wrap { margin-bottom: .75rem; }
+.police-preview-wrap:has(#police-preview[hidden]) { display: none; }
+.police-upload-wrap.hidden { display: none; }
+.police-result-panel .gesture-result {
+  text-align: left;
+  font-size: 1rem;
+  line-height: 1.5;
+  min-height: 72px;
+}
+.police-result-panel .history-list {
+  max-height: 240px;
+  overflow-y: auto;
+  padding-right: .25rem;
+}
+.police-result-panel .history-item {
+  border-radius: 6px;
+  padding: .6rem .75rem;
+}
+.video-control-row {
+  display: flex;
+  gap: .5rem;
+  margin: .75rem 0;
+}
+.video-control-row[hidden] { display: none; }

@@ -347,6 +347,7 @@ const App = {
   showPoliceUploadPreview(file, isVideo) {
     const imagePreview = document.getElementById('police-preview');
     const videoPreview = document.getElementById('police-upload-preview');
+    const videoWrap = document.getElementById('police-upload-wrap');
     const controls = document.getElementById('police-upload-controls');
     const playButton = document.getElementById('police-upload-play');
     const url = URL.createObjectURL(file);
@@ -360,6 +361,7 @@ const App = {
         videoPreview.hidden = false;
         videoPreview.load();
       }
+      if (videoWrap) videoWrap.classList.remove('hidden');
       if (controls) controls.hidden = false;
       if (playButton) playButton.textContent = '播放视频';
       if (imagePreview) {
@@ -374,6 +376,7 @@ const App = {
       videoPreview.removeAttribute('src');
       videoPreview.hidden = true;
     }
+    if (videoWrap) videoWrap.classList.add('hidden');
     if (controls) controls.hidden = true;
     if (imagePreview) {
       imagePreview.src = url;
