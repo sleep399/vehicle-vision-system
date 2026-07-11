@@ -194,6 +194,26 @@ const App = {
     } catch (e) { alert(e.message); }
   },
 
+  async register() {
+    const username = document.getElementById('register-user').value.trim();
+    const password = document.getElementById('register-pass').value;
+    const email = document.getElementById('register-email').value.trim() || null;
+    const phone = document.getElementById('register-phone').value.trim() || null;
+    if (!username || !password) {
+      alert('请输入用户名和密码');
+      return;
+    }
+    try {
+      const data = await this.api('/api/auth/register', {
+        method: 'POST',
+        body: JSON.stringify({ username, password, email, phone }),
+      });
+      this.token = data.access_token;
+      localStorage.setItem('token', this.token);
+      this.showMain();
+    } catch (e) { alert(e.message); }
+  },
+
   async sendCode() {
     const target = document.getElementById('code-target').value;
     try {
@@ -223,7 +243,7 @@ const App = {
     try {
       const session = await this.api('/api/auth/wechat/qrcode', { method: 'POST' });
       const qrBox = document.getElementById('qr-box');
-      qrBox.innerHTML = `微信扫码登录<br><small>${session.session_id.slice(0, 8)}</small><div class="qr-placeholder">二维码已生成，当前为演示模式</div>`;
+      qrBox.innerHTML = `<img src="${session.qrcode_url}" alt="微信扫码登录二维码"><small>请用手机扫描后确认（演示模式）</small>`;
       const poll = setInterval(async () => {
         const res = await fetch(session.poll_url);
         const data = await res.json();

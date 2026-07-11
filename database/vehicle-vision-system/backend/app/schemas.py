@@ -89,6 +89,8 @@ class LogResponse(BaseModel):
     category: str
     level: str
     message: str
+    detail_json: dict | None = None
+    user_id: int | None = None
     created_at: datetime
 
     class Config:

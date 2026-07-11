@@ -1,5 +1,6 @@
 __pycache__/
 *.py[cod]
+.codex_tmp/
 .env
 data/
 uploads/
@@ -8,7 +9,7 @@ backend/app/models/*.task
 .venv/
 venv/
 *.log
-
+AGENTS.md
 # vehicle-vision-system local/generated files
 database/vehicle-vision-system/.codex_tmp/
 database/vehicle-vision-system/.env

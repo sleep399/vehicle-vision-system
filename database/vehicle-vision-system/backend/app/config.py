@@ -10,7 +10,7 @@ class Settings(BaseSettings):
     secret_key: str = "dev-secret-key-change-in-production"
     debug: bool = True
     host: str = "0.0.0.0"
-    port: int = 8000
+    port: int = 8001
     database_url: str = ""
     database_echo: bool = False
     odbc_driver: str = "ODBC Driver 17 for SQL Server"

@@ -22,10 +22,10 @@ python run.py
 
 或双击 `start.bat`（Windows）。
 
-访问 http://localhost:8000
+访问 http://localhost:8001
 
 - 默认账号：`admin` / `admin123`
-- API 文档：http://localhost:8000/api/docs
+- API 文档：http://localhost:8001/api/docs
 
 ## 项目结构
 
