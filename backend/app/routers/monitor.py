@@ -25,6 +25,7 @@ def get_logs(
     category: str | None = None,
     level: str | None = None,
     user_id: int | None = None,
+    search: str | None = Query(None, description="关键词搜索（消息内容）"),
     start: datetime | None = Query(None, description="开始时间，ISO 格式"),
     end: datetime | None = Query(None, description="结束时间，ISO 格式"),
     skip: int = 0,
@@ -35,9 +36,11 @@ def get_logs(
     if category:
         q = q.filter(SystemLog.category == category)
     if level:
-        q = q.filter(SystemLog.level == level)
+        q = q.filter(SystemLog.level == level.upper())
     if user_id is not None:
         q = q.filter(SystemLog.user_id == user_id)
+    if search:
+        q = q.filter(SystemLog.message.contains(search))
     if start:
         q = q.filter(SystemLog.created_at >= start)
     if end:

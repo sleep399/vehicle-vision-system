@@ -1120,15 +1120,28 @@ const App = {
 
   async loadLogs() {
     const cat = document.getElementById('log-category')?.value || '';
+    const level = document.getElementById('log-level')?.value || '';
+    const search = document.getElementById('log-search')?.value || '';
+    const userId = document.getElementById('log-user')?.value || '';
+    const start = document.getElementById('log-start')?.value || '';
+    const end = document.getElementById('log-end')?.value || '';
     try {
-      const data = await this.api('/api/monitor/logs?limit=50' + (cat ? '&category=' + cat : ''));
-      document.getElementById('log-table').innerHTML =
-        '<div class="log-row header"><span>时间</span><span>级别</span><span>类别</span><span>消息</span></div>' +
-        data.map(l =>
-          `<div class="log-row"><span>${new Date(l.created_at).toLocaleString()}</span><span class="level-${l.level}">${l.level}</span><span>${l.category}</span><span>${l.message}</span></div>`
-        ).join('') || '<p>暂无日志</p>';
+      let url = '/api/monitor/logs?limit=100';
+      if (cat) url += '&category=' + encodeURIComponent(cat);
+      if (level) url += '&level=' + encodeURIComponent(level);
+      if (search) url += '&search=' + encodeURIComponent(search);
+      if (userId) url += '&user_id=' + encodeURIComponent(userId);
+      if (start) url += '&start=' + encodeURIComponent(new Date(start).toISOString());
+      if (end) url += '&end=' + encodeURIComponent(new Date(end).toISOString());
+
+      const data = await this.api(url);
+      const header = '<div class="log-row header"><span>时间</span><span>级别</span><span>类别</span><span>消息</span></div>';
+      const rows = (data || []).map(l =>
+        `<div class="log-row"><span>${new Date(l.created_at).toLocaleString()}</span><span class="level-${l.level}">${l.level}</span><span>${l.category}</span><span>${l.message}</span></div>`
+      ).join('');
+      document.getElementById('log-table').innerHTML = header + (rows || '<p style="padding:1rem;color:var(--text-muted);">暂无符合条件的日志</p>');
     } catch (e) {
-      document.getElementById('log-table').innerHTML = `<p>加载日志失败: ${e.message}</p>`;
+      document.getElementById('log-table').innerHTML = `<p style="padding:1rem;color:var(--danger);">加载日志失败: ${e.message}</p>`;
     }
   },
 };
