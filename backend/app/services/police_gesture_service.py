@@ -1,6 +1,5 @@
 import io
-import math
-from collections import Counter
+from collections import Counter, deque
 from typing import Any
 import cv2
 import numpy as np
@@ -11,6 +10,7 @@ from mediapipe.tasks.python import vision
 
 from app.utils.helpers import ndarray_to_base64
 from app.utils.model_loader import get_model_path
+from app.services.police_gesture_classifier import PoliceGestureClassifier
 
 
 POLICE_GESTURES = {
@@ -39,45 +39,31 @@ class PoliceGestureService:
             num_poses=1,
         )
         self.landmarker = vision.PoseLandmarker.create_from_options(options)
-        self._history: list[int] = []
+        self.classifier = PoliceGestureClassifier()
+        self._history: deque[tuple[int, float]] = deque(maxlen=5)
 
     def _lm(self, landmarks, idx, w, h):
         lm = landmarks[idx]
         return lm.x * w, lm.y * h, lm.visibility
 
     def _classify_gesture(self, landmarks, w, h) -> tuple[int, float]:
-        ls = self._lm(landmarks, 11, w, h)
-        rs = self._lm(landmarks, 12, w, h)
-        le = self._lm(landmarks, 13, w, h)
-        re = self._lm(landmarks, 14, w, h)
-        lw = self._lm(landmarks, 15, w, h)
-        rw = self._lm(landmarks, 16, w, h)
-        nose = self._lm(landmarks, 0, w, h)
-        shoulder_y = (ls[1] + rs[1]) / 2
-        scores = {i: 0.0 for i in range(9)}
+        prediction = self.classifier.classify(landmarks)
+        return prediction.gesture_id, prediction.confidence
 
-        if lw[1] < ls[1] - 30 and rw[1] < rs[1] - 30:
-            scores[1] = 0.9
-        if abs(lw[1] - shoulder_y) < 40 and abs(rw[1] - shoulder_y) < 40:
-            scores[2] = 0.85
-        if lw[1] < nose[1] and le[1] < ls[1]:
-            scores[3] = 0.8
-        if lw[1] < ls[1] and rw[1] > rs[1] + 20:
-            scores[4] = 0.75
-        if rw[1] < rs[1] - 20:
-            scores[5] = 0.8
-        if abs(lw[1] - rw[1]) < 30:
-            scores[6] = 0.7
-        if lw[1] > ls[1] + 10 and rw[1] > rs[1] + 10:
-            scores[7] = 0.75
-        if rw[1] > rs[1] + 40 or lw[1] > ls[1] + 40:
-            scores[8] = 0.7
-
-        best = max(scores, key=scores.get)
-        conf = scores[best]
-        if conf < 0.5:
-            return 0, 0.3
-        return best, conf
+    def _smooth_prediction(self, gesture_id: int, confidence: float) -> tuple[int, float]:
+        """Use a short weighted vote to suppress one-frame pose jitter."""
+        if gesture_id == 0:
+            self._history.clear()
+            return 0, confidence
+        self._history.append((gesture_id, confidence))
+        votes: dict[int, float] = {}
+        for recorded_id, recorded_confidence in self._history:
+            votes[recorded_id] = votes.get(recorded_id, 0.0) + recorded_confidence
+        voted_id = max(votes, key=votes.get)
+        # A single frame is still returned so image uploads remain responsive;
+        # video streams become stable as more frames arrive.
+        voted_confidence = votes[voted_id] / sum(1 for item in self._history if item[0] == voted_id)
+        return voted_id, round(voted_confidence, 3)
 
     def _draw_skeleton(self, image, landmarks, w, h):
         for a, b in POSE_CONNECTIONS:
@@ -131,6 +117,7 @@ class PoliceGestureService:
             landmarks = result.pose_landmarks[0]
             self._draw_skeleton(annotated, landmarks, w, h)
             gesture_id, confidence = self._classify_gesture(landmarks, w, h)
+            gesture_id, confidence = self._smooth_prediction(gesture_id, confidence)
             keypoints = self._extract_keypoints(landmarks, w, h)
 
         en, cn = POLICE_GESTURES[gesture_id]

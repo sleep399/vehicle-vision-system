@@ -1,0 +1,315 @@
+openapi: 3.0.3
+info:
+  title: 车载视觉感知与人机交互系统 API
+  version: 1.0.0
+  description: |
+    覆盖车牌识别、交警手势识别、车主手势控车、日志监控与告警智能体四个模块。
+    Swagger UI：`/api/docs`；原始运行时定义：`/api/openapi.json`。
+servers:
+  - url: http://{host}:8001
+    variables:
+      host:
+        default: localhost
+tags:
+  - name: 认证
+  - name: 车牌识别
+  - name: 交警手势识别
+  - name: 车主手势控车
+  - name: 监控与告警
+paths:
+  /api/auth/register:
+    post:
+      tags: [认证]
+      summary: 账号密码注册并签发令牌
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/UserCreate'}
+      responses:
+        '200': {description: 注册成功, content: {application/json: {schema: {$ref: '#/components/schemas/Token'}}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '422': {$ref: '#/components/responses/ValidationError'}
+  /api/auth/login:
+    post:
+      tags: [认证]
+      summary: 账号密码登录
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/UserLogin'}
+      responses:
+        '200': {description: 登录成功, content: {application/json: {schema: {$ref: '#/components/schemas/Token'}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '422': {$ref: '#/components/responses/ValidationError'}
+  /api/auth/send-code:
+    post:
+      tags: [认证]
+      summary: 发送登录验证码（演示模式会在响应中返回验证码）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/SendCodeRequest'}
+      responses:
+        '200': {description: 已发送, content: {application/json: {schema: {$ref: '#/components/schemas/SendCodeResponse'}}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '422': {$ref: '#/components/responses/ValidationError'}
+  /api/auth/login-code:
+    post:
+      tags: [认证]
+      summary: 验证码登录；首次登录自动创建用户
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CodeLoginRequest'}
+      responses:
+        '200': {description: 登录成功, content: {application/json: {schema: {$ref: '#/components/schemas/Token'}}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '422': {$ref: '#/components/responses/ValidationError'}
+  /api/auth/wechat/qrcode:
+    post:
+      tags: [认证]
+      summary: 创建微信扫码登录会话（演示）
+      responses:
+        '200': {description: 会话已创建, content: {application/json: {schema: {$ref: '#/components/schemas/WechatQRCodeSession'}}}}
+  /api/auth/wechat/qrcode/{session_id}:
+    get:
+      tags: [认证]
+      summary: 获取扫码登录二维码 PNG
+      parameters: [{$ref: '#/components/parameters/SessionId'}]
+      responses:
+        '200': {description: PNG 二维码, content: {image/png: {schema: {type: string, format: binary}}}}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/auth/wechat/confirm/{session_id}:
+    post:
+      tags: [认证]
+      summary: 确认扫码登录（演示）
+      parameters: [{$ref: '#/components/parameters/SessionId'}]
+      responses:
+        '200': {description: 已确认, content: {application/json: {schema: {$ref: '#/components/schemas/WechatConfirmResponse'}}}}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/auth/wechat/poll/{session_id}:
+    get:
+      tags: [认证]
+      summary: 轮询扫码登录状态；确认后返回令牌
+      parameters: [{$ref: '#/components/parameters/SessionId'}]
+      responses:
+        '200': {description: 当前会话状态, content: {application/json: {schema: {$ref: '#/components/schemas/WechatPollResponse'}}}}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/auth/me:
+    get:
+      tags: [认证]
+      summary: 获取当前登录用户
+      security: [{bearerAuth: []}]
+      responses:
+        '200': {description: 用户信息, content: {application/json: {schema: {$ref: '#/components/schemas/UserProfile'}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /api/lpr/recognize:
+    post:
+      tags: [车牌识别]
+      summary: 上传图像识别车牌
+      security: [{bearerAuth: []}]
+      requestBody: {$ref: '#/components/requestBodies/ImageFile'}
+      responses:
+        '200': {description: 识别完成, content: {application/json: {schema: {$ref: '#/components/schemas/LPRResponse'}}}}
+        '500': {$ref: '#/components/responses/RecognitionFailure'}
+  /api/lpr/recognize-video:
+    post:
+      tags: [车牌识别]
+      summary: 上传视频并按间隔抽帧识别
+      security: [{bearerAuth: []}]
+      parameters:
+        - name: interval
+          in: query
+          description: 采样间隔，单位为帧
+          schema: {type: integer, minimum: 1, maximum: 60, default: 15}
+      requestBody: {$ref: '#/components/requestBodies/VideoFile'}
+      responses:
+        '200': {description: 视频处理完成, content: {application/json: {schema: {$ref: '#/components/schemas/LPRVideoResponse'}}}}
+        '500': {$ref: '#/components/responses/RecognitionFailure'}
+  /api/lpr/history:
+    get:
+      tags: [车牌识别]
+      summary: 查询当前用户及匿名车牌识别历史
+      security: [{bearerAuth: []}]
+      parameters: [{$ref: '#/components/parameters/Skip'}, {$ref: '#/components/parameters/HistoryLimit'}]
+      responses:
+        '200': {description: 历史记录, content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/LPRHistoryItem'}}}}}
+  /api/lpr/ccpd-sample:
+    get:
+      tags: [车牌识别]
+      summary: 查询 CCPD 测试集样本路径
+      responses:
+        '200': {description: 样本信息, content: {application/json: {schema: {$ref: '#/components/schemas/CCPDSampleResponse'}}}}
+  /api/police-gesture/recognize:
+    post:
+      tags: [交警手势识别]
+      summary: 上传图像或 GIF 识别交警手势
+      security: [{bearerAuth: []}]
+      requestBody: {$ref: '#/components/requestBodies/ImageFile'}
+      responses:
+        '200': {description: 识别完成, content: {application/json: {schema: {$ref: '#/components/schemas/GestureResponse'}}}}
+        '500': {$ref: '#/components/responses/RecognitionFailure'}
+  /api/police-gesture/gestures:
+    get:
+      tags: [交警手势识别]
+      summary: 获取支持的交警手势字典
+      responses:
+        '200': {description: 手势字典, content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/PoliceGestureItem'}}}}}
+  /api/police-gesture/history:
+    get:
+      tags: [交警手势识别]
+      summary: 查询交警手势识别历史
+      parameters: [{$ref: '#/components/parameters/Skip'}, {$ref: '#/components/parameters/HistoryLimit'}]
+      responses:
+        '200': {description: 历史记录, content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/GestureHistoryItem'}}}}}
+  /api/owner-gesture/recognize:
+    post:
+      tags: [车主手势控车]
+      summary: 识别车主手势，并在存在动作时更新模拟车辆状态
+      security: [{bearerAuth: []}]
+      requestBody: {$ref: '#/components/requestBodies/ImageFile'}
+      responses:
+        '200': {description: 识别及控车完成, content: {application/json: {schema: {$ref: '#/components/schemas/GestureResponse'}}}}
+        '500': {$ref: '#/components/responses/RecognitionFailure'}
+  /api/owner-gesture/vehicle-state:
+    get:
+      tags: [车主手势控车]
+      summary: 获取当前用户的模拟车辆状态
+      security: [{bearerAuth: []}]
+      responses:
+        '200': {description: 当前车辆状态, content: {application/json: {schema: {$ref: '#/components/schemas/VehicleState'}}}}
+    put:
+      tags: [车主手势控车]
+      summary: 手动更新当前用户的模拟车辆状态
+      security: [{bearerAuth: []}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/VehicleState'}}}
+      responses:
+        '200': {description: 更新后的车辆状态, content: {application/json: {schema: {$ref: '#/components/schemas/VehicleState'}}}}
+        '422': {$ref: '#/components/responses/ValidationError'}
+  /api/owner-gesture/gestures:
+    get:
+      tags: [车主手势控车]
+      summary: 获取支持的车主手势及对应车辆动作
+      responses:
+        '200': {description: 手势字典, content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/OwnerGestureItem'}}}}}
+  /api/owner-gesture/history:
+    get:
+      tags: [车主手势控车]
+      summary: 查询车主手势识别历史
+      parameters: [{$ref: '#/components/parameters/Skip'}, {$ref: '#/components/parameters/HistoryLimit'}]
+      responses:
+        '200': {description: 历史记录, content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/GestureHistoryItem'}}}}}
+  /api/monitor/logs:
+    get:
+      tags: [监控与告警]
+      summary: 按条件查询系统日志
+      parameters:
+        - {name: category, in: query, schema: {type: string, enum: [lpr, police_gesture, owner_gesture, alert, user]}}
+        - {name: level, in: query, schema: {type: string, enum: [INFO, WARN, ERROR, WARNING, CRITICAL]}}
+        - {name: user_id, in: query, schema: {type: integer}}
+        - {name: start, in: query, schema: {type: string, format: date-time}}
+        - {name: end, in: query, schema: {type: string, format: date-time}}
+        - {$ref: '#/components/parameters/Skip'}
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, default: 50}}
+      responses:
+        '200': {description: 日志列表, content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/SystemLog'}}}}}
+  /api/monitor/alerts:
+    get:
+      tags: [监控与告警]
+      summary: 查询告警历史
+      parameters:
+        - {name: level, in: query, schema: {type: string, enum: [info, warning, critical]}}
+        - {$ref: '#/components/parameters/Skip'}
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, default: 50}}
+      responses:
+        '200': {description: 告警列表, content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/Alert'}}}}}
+  /api/monitor/alerts/stats:
+    get:
+      tags: [监控与告警]
+      summary: 获取告警统计与最近告警
+      responses:
+        '200': {description: 告警统计, content: {application/json: {schema: {$ref: '#/components/schemas/AlertStats'}}}}
+  /api/monitor/alerts/{alert_id}/resolve:
+    post:
+      tags: [监控与告警]
+      summary: 标记告警已处理
+      parameters: [{$ref: '#/components/parameters/AlertId'}]
+      responses:
+        '200': {description: 处理结果, content: {application/json: {schema: {$ref: '#/components/schemas/ResolveAlertResponse'}}}}
+  /api/monitor/alerts/test:
+    post:
+      tags: [监控与告警]
+      summary: 手动触发测试告警
+      responses:
+        '200': {description: 已创建测试告警, content: {application/json: {schema: {$ref: '#/components/schemas/TestAlertResponse'}}}}
+  /api/monitor/assistant:
+    post:
+      tags: [监控与告警]
+      summary: 向告警智能体提问
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/AssistantQuery'}}}
+      responses:
+        '200': {description: 智能体回答, content: {application/json: {schema: {$ref: '#/components/schemas/AssistantResponse'}}}}
+        '500': {$ref: '#/components/responses/InternalError'}
+components:
+  securitySchemes:
+    bearerAuth: {type: http, scheme: bearer, bearerFormat: JWT}
+  parameters:
+    SessionId: {name: session_id, in: path, required: true, schema: {type: string}}
+    AlertId: {name: alert_id, in: path, required: true, schema: {type: integer, minimum: 1}}
+    Skip: {name: skip, in: query, schema: {type: integer, minimum: 0, default: 0}}
+    HistoryLimit: {name: limit, in: query, schema: {type: integer, minimum: 1, default: 20}}
+  requestBodies:
+    ImageFile:
+      required: true
+      content: {multipart/form-data: {schema: {type: object, required: [file], properties: {file: {type: string, format: binary, description: 图片或 GIF 文件}}}}}
+    VideoFile:
+      required: true
+      content: {multipart/form-data: {schema: {type: object, required: [file], properties: {file: {type: string, format: binary, description: 视频文件}}}}}
+  responses:
+    BadRequest: {description: 参数或业务状态错误，见《全局错误码表》, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    Unauthorized: {description: 未认证或令牌无效, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    Forbidden: {description: 无访问权限或用户已禁用, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    NotFound: {description: 资源不存在, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    ValidationError: {description: 请求校验失败, content: {application/json: {schema: {$ref: '#/components/schemas/ValidationError'}}}}
+    RecognitionFailure: {description: 图像/模型处理失败, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    InternalError: {description: 服务内部错误, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+  schemas:
+    Token: {type: object, required: [access_token, token_type], properties: {access_token: {type: string}, token_type: {type: string, example: bearer}}}
+    UserCreate: {type: object, required: [username, password], properties: {username: {type: string}, password: {type: string, format: password}, email: {type: string, format: email, nullable: true}, phone: {type: string, nullable: true}}}
+    UserLogin: {type: object, required: [username, password], properties: {username: {type: string}, password: {type: string, format: password}}}
+    SendCodeRequest: {type: object, required: [target], properties: {target: {type: string}, target_type: {type: string, enum: [email, phone], default: email}}}
+    CodeLoginRequest: {type: object, required: [target, code], properties: {target: {type: string}, code: {type: string, pattern: '^\\d{6}$'}, target_type: {type: string, enum: [email, phone], default: email}}}
+    SendCodeResponse: {type: object, properties: {message: {type: string}, code: {type: string, description: 仅演示环境返回}, expires_in: {type: integer, example: 300}}}
+    UserProfile: {type: object, properties: {id: {type: integer}, username: {type: string}, email: {type: string, nullable: true}, phone: {type: string, nullable: true}}}
+    WechatQRCodeSession: {type: object, properties: {session_id: {type: string}, qrcode_url: {type: string}, poll_url: {type: string}}}
+    WechatConfirmResponse: {type: object, properties: {status: {type: string, enum: [confirmed]}}}
+    WechatPollResponse: {type: object, properties: {status: {type: string, enum: [pending, confirmed]}, access_token: {type: string, nullable: true}}}
+    PlateResult: {type: object, required: [plate_number, plate_color, confidence, bbox], properties: {plate_number: {type: string}, plate_color: {type: string}, confidence: {type: number, format: float}, bbox: {type: array, items: {type: integer}, minItems: 4, maxItems: 4}}}
+    LPRResponse: {type: object, required: [plates, plate_count, annotated_image, success], properties: {plates: {type: array, items: {$ref: '#/components/schemas/PlateResult'}}, plate_count: {type: integer}, annotated_image: {type: string, description: JPEG 的 Base64 编码}, success: {type: boolean}, record_id: {type: integer, nullable: true}}}
+    LPRVideoResponse: {type: object, properties: {frame_count: {type: integer}, results: {type: array, items: {type: object, additionalProperties: true}}}}
+    LPRHistoryItem: {type: object, properties: {id: {type: integer}, source_type: {type: string}, plate_count: {type: integer}, annotated_image: {type: string, nullable: true}, created_at: {type: string, format: date-time}}}
+    CCPDSampleResponse: {type: object, properties: {samples: {type: array, items: {type: object, properties: {relative: {type: string}, exists: {type: boolean}, full_path: {type: string}}}}, ccpd_root: {type: string}, message: {type: string}}}
+    GestureResponse: {type: object, required: [gesture, gesture_cn, confidence, annotated_image, keypoints, success], properties: {gesture: {type: string}, gesture_cn: {type: string}, confidence: {type: number, format: float}, annotated_image: {type: string, description: JPEG 的 Base64 编码}, keypoints: {type: array, items: {$ref: '#/components/schemas/PoseKeypoint'}}, success: {type: boolean}, record_id: {type: integer, nullable: true}, action: {type: string, nullable: true, description: 仅车主手势控车可能返回}}}
+    PoseKeypoint: {type: object, properties: {id: {type: integer}, x: {type: number}, y: {type: number}, z: {type: number}, visibility: {type: number}}}
+    PoliceGestureItem: {type: object, properties: {id: {type: integer, minimum: 1, maximum: 8}, en: {type: string}, cn: {type: string}}}
+    OwnerGestureItem: {type: object, properties: {key: {type: string}, en: {type: string}, cn: {type: string}, action: {type: string, nullable: true}}}
+    GestureHistoryItem: {type: object, properties: {id: {type: integer}, gesture: {type: string}, gesture_cn: {type: string}, confidence: {type: number}, action: {type: string, nullable: true}, annotated_image: {type: string, nullable: true}, created_at: {type: string, format: date-time}}}
+    VehicleState: {type: object, required: [volume, temperature, phone_status, current_page, is_awake], properties: {volume: {type: integer}, temperature: {type: integer}, phone_status: {type: string}, current_page: {type: string}, is_awake: {type: integer, enum: [0, 1]}}}
+    SystemLog: {type: object, properties: {id: {type: integer}, category: {type: string}, level: {type: string}, message: {type: string}, detail_json: {type: object, nullable: true}, user_id: {type: integer, nullable: true}, created_at: {type: string, format: date-time}}}
+    Alert: {type: object, properties: {id: {type: integer}, level: {type: string, enum: [info, warning, critical]}, event_type: {type: string}, title: {type: string}, summary: {type: string}, root_cause: {type: string, nullable: true}, suggestion: {type: string, nullable: true}, status: {type: string}, created_at: {type: string, format: date-time}}}
+    AlertStats: {type: object, properties: {total: {type: integer}, by_level: {type: object, additionalProperties: {type: integer}}, by_type: {type: object, additionalProperties: {type: integer}}, recent: {type: array, items: {$ref: '#/components/schemas/Alert'}}}}
+    ResolveAlertResponse: {type: object, properties: {message: {type: string}, id: {type: integer, nullable: true}}}
+    TestAlertResponse: {type: object, properties: {id: {type: integer}, title: {type: string}, summary: {type: string}}}
+    AssistantQuery: {type: object, required: [question], properties: {question: {type: string}, event_type: {type: string, nullable: true}, path: {type: string, nullable: true}, ip: {type: string, nullable: true}}}
+    AssistantResponse: {type: object, properties: {answer: {type: string}, context: {type: object, additionalProperties: {type: string}}}}
+    Error: {type: object, required: [detail], properties: {detail: {type: string, description: FastAPI 当前实现的错误消息}}}
+    ValidationError: {type: object, required: [detail], properties: {detail: {type: array, items: {type: object, additionalProperties: true}}}}

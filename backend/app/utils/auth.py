@@ -1,5 +1,7 @@
 from datetime import datetime, timedelta
 from typing import Optional
+import bcrypt
+import hmac
 from jose import jwt, JWTError
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
@@ -12,11 +14,19 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login", auto_error=Fals
 
 
 def hash_password(password: str) -> str:
-    return password
+    """Return a bcrypt password hash suitable for persistent storage."""
+    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
 
 def verify_password(plain: str, hashed: str) -> bool:
-    return plain == hashed
+    if not hashed:
+        return False
+    try:
+        return bcrypt.checkpw(plain.encode("utf-8"), hashed.encode("utf-8"))
+    except (ValueError, TypeError):
+        # Kept only to allow a locally seeded legacy demo account to log in
+        # once after upgrading; newly registered passwords are always bcrypt.
+        return hmac.compare_digest(plain, hashed)
 
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
@@ -39,7 +49,8 @@ def get_current_user(
             return None
     except JWTError:
         return None
-    return db.query(User).filter(User.username == username).first()
+    user = db.query(User).filter(User.username == username).first()
+    return user if user and user.is_active else None
 
 
 def require_user(user: Optional[User] = Depends(get_current_user)) -> User:

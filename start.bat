@@ -13,7 +13,7 @@ if defined PORT_PID (
   exit /b 0
 )
 
-"%PYTHON_EXE%" -c "import importlib.util, sys; modules=('fastapi','uvicorn','multipart','sqlalchemy','pydantic_settings','jose','bcrypt','aiofiles','websockets','cv2','numpy','PIL','httpx','mediapipe','torch','torchvision','cryptography','dotenv','email_validator'); missing=[m for m in modules if importlib.util.find_spec(m) is None]; print('Missing dependencies: ' + ', '.join(missing)) if missing else print('Dependencies already installed.'); sys.exit(1 if missing else 0)"
+"%PYTHON_EXE%" -c "import importlib.util, sys; modules=('fastapi','uvicorn','multipart','sqlalchemy','pydantic_settings','jose','bcrypt','qrcode','aiofiles','websockets','cv2','numpy','PIL','httpx','mediapipe','torch','torchvision','cryptography','dotenv','email_validator'); missing=[m for m in modules if importlib.util.find_spec(m) is None]; print('Missing dependencies: ' + ', '.join(missing)) if missing else print('Dependencies already installed.'); sys.exit(1 if missing else 0)"
 if errorlevel 1 (
   echo Installing dependencies...
   "%PYTHON_EXE%" -m pip install -r requirements.txt -q

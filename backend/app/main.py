@@ -7,6 +7,7 @@ from fastapi.responses import FileResponse
 from app.config import settings
 from app.database import init_db
 from app.models.user import User
+from app.database import SessionLocal
 from app.utils.auth import hash_password
 from app.routers import auth, lpr, police_gesture, owner_gesture, monitor, websocket
 
@@ -21,8 +22,8 @@ async def lifespan(app: FastAPI):
         except Exception:
             admin = None
         if not admin:
-            db.add(
-                User(
+            db.execute(
+                User.__table__.insert().values(
                     username="admin",
                     email="admin@demo.com",
                     hashed_password=hash_password("admin123"),

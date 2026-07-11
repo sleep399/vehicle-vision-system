@@ -24,4 +24,8 @@ database/vehicle-vision-system/**/*.db
 database/vehicle-vision-system/.venv/
 database/vehicle-vision-system/venv/
 database/vehicle-vision-system/backend/app/models/*.task
+database/vehicle-vision-system/*.pt
 database/vehicle-vision-system/[0-9]*.[0-9]*.[0-9]*
+
+# Local temporary artifacts
+tmp/

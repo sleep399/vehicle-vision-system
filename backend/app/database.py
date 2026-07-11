@@ -34,9 +34,6 @@ def get_db():
     db = SessionLocal()
     try:
         yield db
-    except Exception:
-        alert_agent.record_db_connection(False)
-        raise
     finally:
         db.close()
 

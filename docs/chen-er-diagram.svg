@@ -1,0 +1,101 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1180" viewBox="0 0 1600 1180" role="img" aria-labelledby="title desc">
+  <title id="title">车载视觉感知与人机交互系统陈氏 ER 图</title>
+  <desc id="desc">矩形代表实体表，菱形代表联系，椭圆代表属性。数字 1 和 n 表示基数。</desc>
+  <style>
+    text { font-family: "Microsoft YaHei", "Noto Sans CJK SC", sans-serif; fill: #172033; font-size: 17px; text-anchor: middle; dominant-baseline: middle; }
+    .title { font-size: 26px; font-weight: 700; }
+    .section { font-size: 21px; font-weight: 700; }
+    .entity { fill: #e8f0fe; stroke: #315c9f; stroke-width: 2; }
+    .relationship { fill: #fff1db; stroke: #a35e12; stroke-width: 2; }
+    .attribute { fill: #f8fafc; stroke: #526273; stroke-width: 1.5; }
+    .edge { stroke: #526273; stroke-width: 1.6; fill: none; }
+    .dashed { stroke-dasharray: 6 5; }
+    .cardinality { font-size: 18px; font-weight: 700; fill: #8a4200; }
+    .note { font-size: 14px; fill: #526273; }
+    .key { text-decoration: underline; }
+  </style>
+
+  <text x="800" y="38" class="title">车载视觉感知与人机交互系统（陈氏 ER 图）</text>
+  <text x="800" y="66" class="note">矩形＝实体表　菱形＝联系　椭圆＝属性　下划线＝主键　虚线＝当前由应用层维护、未建数据库外键</text>
+
+  <!-- 认证域 -->
+  <text x="270" y="112" class="section">认证与用户</text>
+  <rect x="195" y="275" width="150" height="58" class="entity"/><text x="270" y="304">用户 USERS</text>
+  <ellipse cx="82" cy="210" rx="68" ry="28" class="attribute"/><text x="82" y="210" class="key">id</text><line x1="132" y1="231" x2="205" y2="279" class="edge"/>
+  <ellipse cx="86" cy="304" rx="78" ry="28" class="attribute"/><text x="86" y="304">username</text><line x1="164" y1="304" x2="195" y2="304" class="edge"/>
+  <ellipse cx="88" cy="394" rx="65" ry="28" class="attribute"/><text x="88" y="394">email</text><line x1="140" y1="375" x2="209" y2="329" class="edge"/>
+  <ellipse cx="452" cy="216" rx="75" ry="28" class="attribute"/><text x="452" y="216">phone</text><line x1="401" y1="236" x2="332" y2="278" class="edge"/>
+  <ellipse cx="465" cy="306" rx="106" ry="28" class="attribute"/><text x="465" y="306">is_active</text><line x1="359" y1="306" x2="345" y2="306" class="edge"/>
+  <ellipse cx="452" cy="394" rx="105" ry="28" class="attribute"/><text x="452" y="394">created_at</text><line x1="377" y1="374" x2="332" y2="330" class="edge"/>
+
+  <polygon points="620,276 674,304 620,332 566,304" class="relationship"/><text x="620" y="304">确认登录</text>
+  <line x1="345" y1="304" x2="566" y2="304" class="edge dashed"/><text x="370" y="286" class="cardinality">1</text>
+  <rect x="742" y="275" width="205" height="58" class="entity"/><text x="845" y="304">微信会话</text><text x="845" y="325" class="note">WECHAT_LOGIN_SESSIONS</text>
+  <line x1="674" y1="304" x2="742" y2="304" class="edge dashed"/><text x="706" y="286" class="cardinality">n</text>
+  <ellipse cx="845" cy="192" rx="78" ry="28" class="attribute"/><text x="845" y="192" class="key">id</text><line x1="845" y1="220" x2="845" y2="275" class="edge"/>
+  <ellipse cx="1080" cy="242" rx="100" ry="28" class="attribute"/><text x="1080" y="242">session_id</text><line x1="985" y1="255" x2="947" y2="281" class="edge"/>
+  <ellipse cx="1080" cy="340" rx="70" ry="28" class="attribute"/><text x="1080" y="340">status</text><line x1="1015" y1="330" x2="947" y2="320" class="edge"/>
+
+  <polygon points="620,448 674,476 620,504 566,476" class="relationship"/><text x="620" y="476">使用</text>
+  <line x1="270" y1="333" x2="566" y2="476" class="edge dashed"/><text x="369" y="391" class="cardinality">1</text>
+  <rect x="742" y="447" width="205" height="58" class="entity"/><text x="845" y="476">验证码</text><text x="845" y="497" class="note">VERIFICATION_CODES</text>
+  <line x1="674" y1="476" x2="742" y2="476" class="edge dashed"/><text x="706" y="458" class="cardinality">n</text>
+  <ellipse cx="844" cy="564" rx="62" ry="28" class="attribute"/><text x="844" y="564" class="key">id</text><line x1="844" y1="536" x2="844" y2="505" class="edge"/>
+  <ellipse cx="1060" cy="447" rx="75" ry="28" class="attribute"/><text x="1060" y="447">target</text><line x1="985" y1="455" x2="947" y2="465" class="edge"/>
+  <ellipse cx="1060" cy="513" rx="68" ry="28" class="attribute"/><text x="1060" y="513">expires_at</text><line x1="995" y1="505" x2="947" y2="494" class="edge"/>
+
+  <!-- 视觉业务域 -->
+  <text x="280" y="650" class="section">视觉识别与控车</text>
+  <rect x="195" y="815" width="150" height="58" class="entity"/><text x="270" y="844">用户 USERS</text>
+  <ellipse cx="80" cy="753" rx="62" ry="28" class="attribute"/><text x="80" y="753" class="key">id</text><line x1="130" y1="773" x2="210" y2="817" class="edge"/>
+  <ellipse cx="88" cy="844" rx="78" ry="28" class="attribute"/><text x="88" y="844">username</text><line x1="166" y1="844" x2="195" y2="844" class="edge"/>
+
+  <polygon points="485,718 542,751 485,784 428,751" class="relationship"/><text x="485" y="751">产生</text>
+  <line x1="330" y1="815" x2="428" y2="772" class="edge dashed"/><text x="360" y="780" class="cardinality">1</text>
+  <rect x="612" y="720" width="185" height="62" class="entity"/><text x="705" y="744">车牌识别记录</text><text x="705" y="766" class="note">LICENSE_PLATE_RECORDS</text>
+  <line x1="542" y1="751" x2="612" y2="751" class="edge dashed"/><text x="568" y="732" class="cardinality">n</text>
+  <ellipse cx="705" cy="665" rx="60" ry="26" class="attribute"/><text x="705" y="665" class="key">id</text><line x1="705" y1="691" x2="705" y2="720" class="edge"/>
+  <ellipse cx="915" cy="705" rx="82" ry="26" class="attribute"/><text x="915" y="705">plates_json</text><line x1="844" y1="719" x2="795" y2="732" class="edge"/>
+  <ellipse cx="915" cy="787" rx="82" ry="26" class="attribute"/><text x="915" y="787">created_at</text><line x1="839" y1="776" x2="797" y2="766" class="edge"/>
+
+  <polygon points="485,886 542,919 485,952 428,919" class="relationship"/><text x="485" y="919">产生</text>
+  <line x1="345" y1="856" x2="428" y2="903" class="edge dashed"/><text x="365" y="894" class="cardinality">1</text>
+  <rect x="612" y="888" width="185" height="62" class="entity"/><text x="705" y="912">交警手势记录</text><text x="705" y="934" class="note">POLICE_GESTURE_RECORDS</text>
+  <line x1="542" y1="919" x2="612" y2="919" class="edge dashed"/><text x="568" y="900" class="cardinality">n</text>
+  <ellipse cx="705" cy="1014" rx="60" ry="26" class="attribute"/><text x="705" y="1014" class="key">id</text><line x1="705" y1="988" x2="705" y2="950" class="edge"/>
+  <ellipse cx="920" cy="875" rx="72" ry="26" class="attribute"/><text x="920" y="875">gesture</text><line x1="854" y1="884" x2="797" y2="899" class="edge"/>
+  <ellipse cx="920" cy="953" rx="88" ry="26" class="attribute"/><text x="920" y="953">confidence</text><line x1="835" y1="947" x2="797" y2="940" class="edge"/>
+
+  <polygon points="1115,718 1172,751 1115,784 1058,751" class="relationship"/><text x="1115" y="751">产生</text>
+  <line x1="345" y1="830" x2="1058" y2="762" class="edge dashed"/><text x="960" y="780" class="cardinality">1</text>
+  <rect x="1240" y="720" width="185" height="62" class="entity"/><text x="1332" y="744">车主手势记录</text><text x="1332" y="766" class="note">OWNER_GESTURE_RECORDS</text>
+  <line x1="1172" y1="751" x2="1240" y2="751" class="edge dashed"/><text x="1197" y="732" class="cardinality">n</text>
+  <ellipse cx="1332" cy="665" rx="60" ry="26" class="attribute"/><text x="1332" y="665" class="key">id</text><line x1="1332" y1="691" x2="1332" y2="720" class="edge"/>
+  <ellipse cx="1495" cy="705" rx="64" ry="26" class="attribute"/><text x="1495" y="705">action</text><line x1="1437" y1="720" x2="1425" y2="731" class="edge"/>
+  <ellipse cx="1495" cy="787" rx="88" ry="26" class="attribute"/><text x="1495" y="787">confidence</text><line x1="1410" y1="776" x2="1425" y2="766" class="edge"/>
+
+  <polygon points="1115,888 1172,921 1115,954 1058,921" class="relationship"/><text x="1115" y="921">拥有</text>
+  <line x1="345" y1="860" x2="1058" y2="909" class="edge dashed"/><text x="990" y="900" class="cardinality">1</text>
+  <rect x="1240" y="890" width="185" height="62" class="entity"/><text x="1332" y="914">车辆状态</text><text x="1332" y="936" class="note">VEHICLE_STATE</text>
+  <line x1="1172" y1="921" x2="1240" y2="921" class="edge dashed"/><text x="1196" y="902" class="cardinality">1</text>
+  <ellipse cx="1332" cy="1014" rx="60" ry="26" class="attribute"/><text x="1332" y="1014" class="key">id</text><line x1="1332" y1="988" x2="1332" y2="952" class="edge"/>
+  <ellipse cx="1500" cy="880" rx="68" ry="26" class="attribute"/><text x="1500" y="880">volume</text><line x1="1434" y1="891" x2="1425" y2="900" class="edge"/>
+  <ellipse cx="1500" cy="958" rx="92" ry="26" class="attribute"/><text x="1500" y="958">updated_at</text><line x1="1412" y1="950" x2="1425" y2="940" class="edge"/>
+  <polygon points="1035,1020 1092,1052 1035,1084 978,1052" class="relationship"/><text x="1035" y="1052">更新状态</text>
+  <line x1="1240" y1="782" x2="1081" y2="1022" class="edge dashed"/><text x="1140" y="935" class="cardinality">n</text>
+  <line x1="1092" y1="1052" x2="1240" y2="952" class="edge dashed"/><text x="1175" y="1025" class="cardinality">1</text>
+
+  <!-- 监控域 -->
+  <text x="250" y="1114" class="section">监控与告警</text>
+  <rect x="430" y="1083" width="180" height="54" class="entity"/><text x="520" y="1106">告警事件 ALERT_EVENTS</text>
+  <ellipse cx="390" cy="1040" rx="48" ry="23" class="attribute"/><text x="390" y="1040" class="key">id</text><line x1="420" y1="1058" x2="455" y2="1083" class="edge"/>
+  <ellipse cx="518" cy="1028" rx="68" ry="23" class="attribute"/><text x="518" y="1028">event_type</text><line x1="518" y1="1051" x2="518" y2="1083" class="edge"/>
+  <ellipse cx="655" cy="1040" rx="55" ry="23" class="attribute"/><text x="655" y="1040">status</text><line x1="625" y1="1058" x2="584" y2="1083" class="edge"/>
+  <polygon points="770,1078 825,1110 770,1142 715,1110" class="relationship"/><text x="770" y="1110">生成日志</text>
+  <line x1="610" y1="1110" x2="715" y2="1110" class="edge"/><text x="640" y="1092" class="cardinality">1</text>
+  <rect x="900" y="1083" width="185" height="54" class="entity"/><text x="992" y="1106">系统日志 SYSTEM_LOGS</text>
+  <line x1="825" y1="1110" x2="900" y2="1110" class="edge"/><text x="852" y="1092" class="cardinality">n</text>
+  <ellipse cx="914" cy="1040" rx="48" ry="23" class="attribute"/><text x="914" y="1040" class="key">id</text><line x1="935" y1="1060" x2="955" y2="1083" class="edge"/>
+  <ellipse cx="1020" cy="1028" rx="65" ry="23" class="attribute"/><text x="1020" y="1028">category</text><line x1="1020" y1="1051" x2="1020" y2="1083" class="edge"/>
+  <ellipse cx="1138" cy="1040" rx="55" ry="23" class="attribute"/><text x="1138" y="1040">level</text><line x1="1100" y1="1058" x2="1065" y2="1083" class="edge"/>
+</svg>
