@@ -10,16 +10,85 @@ import cv2
 import numpy as np
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from app.database import SessionLocal
 from app.services.lpr_service import lpr_service
 from app.services.lpr_video_service import lpr_video_service
 from app.services.police_gesture_service import police_gesture_service
 from app.services.owner_gesture_service import owner_gesture_service
 from app.services.alert_agent import alert_agent
+from app.utils.logger import log_exception
+from app.utils.recognition_monitor import (
+    record_lpr_recognition,
+    record_owner_recognition,
+    record_police_recognition,
+)
 from app.utils.video import validate_stream_url
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["WebSocket"])
 _lpr_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="lpr-video")
+_stream_last_logged: dict[str, tuple] = {}
+
+
+def _stream_state_signature(module: str, result: dict) -> tuple:
+    if module == "lpr":
+        plates = tuple(
+            (p.get("plate_number"), p.get("plate_color"))
+            for p in (result.get("plates") or [])[:3]
+        )
+        return (result.get("success"), result.get("plate_count"), plates)
+    return (
+        result.get("gesture"), round(float(result.get("confidence", 0)), 1),
+        result.get("action"), bool(result.get("needs_confirmation")),
+    )
+
+
+async def _log_stream_result(module: str, result: dict) -> None:
+    signature = _stream_state_signature(module, result)
+    if _stream_last_logged.get(module) == signature:
+        return
+    _stream_last_logged[module] = signature
+    db = SessionLocal()
+    try:
+        if module == "lpr":
+            await record_lpr_recognition(
+                db, success=bool(result.get("success") and result.get("plate_count", 0) > 0),
+                source="WebSocket流", plate_count=result.get("plate_count", 0),
+                plates=result.get("plates", []), model_available=result.get("model_available"),
+            )
+        elif module == "owner":
+            await record_owner_recognition(
+                db, source="WebSocket流", gesture_cn=result.get("gesture_cn"),
+                confidence=result.get("confidence", 0), gesture=result.get("gesture"),
+                action=result.get("action"), needs_confirmation=bool(result.get("needs_confirmation")),
+                confirm_prompt=result.get("confirm_prompt"), vehicle_state=result.get("vehicle_state"),
+                extra={"stream": True},
+            )
+        else:
+            await record_police_recognition(
+                db, source="WebSocket流", gesture_cn=result.get("gesture_cn"),
+                confidence=result.get("confidence", 0), gesture=result.get("gesture"),
+                extra={"stream": True},
+            )
+    except Exception as exc:
+        log_exception(db, module, "[WebSocket流] 日志写入失败", exc)
+    finally:
+        db.close()
+
+
+async def _log_stream_error(module: str, message: str) -> None:
+    db = SessionLocal()
+    try:
+        if module == "lpr":
+            await record_lpr_recognition(db, success=False, source="WebSocket流", error=message)
+        elif module == "owner":
+            await record_owner_recognition(db, source="WebSocket流", error=message)
+        else:
+            await record_police_recognition(db, source="WebSocket流", error=message)
+    except Exception as exc:
+        log_exception(db, module, "[WebSocket流] 错误日志写入失败", exc)
+    finally:
+        db.close()
 
 
 @router.websocket("/ws/alerts")
@@ -56,6 +125,7 @@ async def ws_stream(websocket: WebSocket, module: str):
                     img_bytes = base64.b64decode(msg["data"])
                 except (KeyError, ValueError, binascii.Error) as exc:
                     logger.warning("视频帧 base64 解析失败: %s", exc)
+                    await _log_stream_error(module, "视频帧解析失败")
                     await websocket.send_json({"type": "error", "message": "视频帧解析失败"})
                     continue
 
@@ -69,6 +139,7 @@ async def ws_stream(websocket: WebSocket, module: str):
                         )
                     except Exception as exc:
                         logger.exception("LPR 视频帧处理失败: %s", exc)
+                        await _log_stream_error(module, str(exc))
                         await websocket.send_json({"type": "error", "message": str(exc)})
                         continue
                 elif hasattr(service, "recognize_frame_continuous"):
@@ -82,6 +153,7 @@ async def ws_stream(websocket: WebSocket, module: str):
                         )
                     except Exception as exc:
                         logger.exception("gesture video frame failed: %s", exc)
+                        await _log_stream_error(module, str(exc))
                         await websocket.send_json({"type": "frame_error", "message": str(exc)})
                         continue
                 else:
@@ -95,6 +167,7 @@ async def ws_stream(websocket: WebSocket, module: str):
                     result.get("success"),
                     result.get("model_available"),
                 )
+                await _log_stream_result(module, result)
                 frame_index += 1
                 await websocket.send_json(
                     {
@@ -147,6 +220,7 @@ async def ws_stream_url(websocket: WebSocket, module: str):
         cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         if not cap.isOpened():
+            await _log_stream_error(module, f"unable to open stream: {url}")
             await websocket.send_json({"type": "error", "message": f"unable to open stream: {url}"})
             return
 
@@ -156,6 +230,7 @@ async def ws_stream_url(websocket: WebSocket, module: str):
         while True:
             ret, frame = cap.read()
             if not ret:
+                await _log_stream_error(module, "stream read failed or ended")
                 await websocket.send_json({"type": "error", "message": "stream read failed or ended"})
                 break
 
@@ -169,6 +244,7 @@ async def ws_stream_url(websocket: WebSocket, module: str):
                         frame,
                         sequence_state,
                     )
+                    await _log_stream_result(module, result)
                     await websocket.send_json(
                         {
                             "type": "result",
@@ -180,6 +256,7 @@ async def ws_stream_url(websocket: WebSocket, module: str):
                     )
                 except Exception as exc:
                     logger.exception("URL stream recognition failed: %s", exc)
+                    await _log_stream_error(module, str(exc))
                     await websocket.send_json({"type": "error", "message": str(exc)})
             frame_index += 1
             await asyncio.sleep(0)

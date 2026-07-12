@@ -12,7 +12,7 @@ from yolo_utils import YOLOPlateDetector
 
 # 导入LPRNet相关模块
 from model.LPRNet import build_lprnet
-from data.load_data import CHARS, CHARS_DICT
+from app.yolo_lprnet.charset import CHARS, CHARS_DICT
 
 
 def greedy_decode(prebs, CHARS):

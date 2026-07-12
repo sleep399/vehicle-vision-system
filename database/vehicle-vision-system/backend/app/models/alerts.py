@@ -16,5 +16,7 @@ class AlertEvent(Base):
     suggestion = Column(Text, nullable=True)
     channels_sent = Column(String(128), default="web")
     status = Column(String(16), default="open")
+    resolution_note = Column(Text, nullable=True)
+    system_health_json = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
     resolved_at = Column(DateTime, nullable=True)

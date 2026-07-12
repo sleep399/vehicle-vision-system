@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import contextlib
-import io
 import os
 import sys
 import threading
@@ -11,10 +10,11 @@ from typing import Any
 import cv2
 import numpy as np
 import torch
-from PIL import Image, ImageSequence
 
 from app.config import settings
+from app.services.ctpgr_pose_adapter import coco_to_ctpgr
 from app.utils.helpers import ndarray_to_base64
+from app.utils.image_draw import draw_cn_text_bgr
 
 
 POLICE_GESTURES = {
@@ -50,7 +50,6 @@ class PoliceGestureService:
     def __init__(self):
         self.ctpgr_root = (settings.base_dir / settings.ctpgr_data_path).resolve()
         self.input_size = (512, 512)
-        self.sequence_steps = 30
         self._predictor = None
         self._pg = None
         self._bla = None
@@ -141,6 +140,7 @@ class PoliceGestureService:
             self._pg = PG
             self._bla = BoneLengthAngle()
             self._g_model = GestureRecognitionModel(1)
+            self._g_model.ckpt_path = self.ctpgr_root / "checkpoints" / settings.police_gesture_model
             self._g_model.load_ckpt(allow_new=False)
             self._g_model.eval()
 
@@ -155,41 +155,46 @@ class PoliceGestureService:
             self._yolo_model = YOLO(model_path)
         return self._yolo_model
 
-    def _detect_best_frame(self, image_bytes: bytes) -> np.ndarray:
-        try:
-            pil_img = Image.open(io.BytesIO(image_bytes))
-            if getattr(pil_img, "is_animated", False):
-                best_frame = None
-                best_score = -1.0
-                for frame in ImageSequence.Iterator(pil_img):
-                    frame_np = cv2.cvtColor(np.array(frame.convert("RGB")), cv2.COLOR_RGB2BGR)
-                    score = cv2.Laplacian(cv2.cvtColor(frame_np, cv2.COLOR_BGR2GRAY), cv2.CV_64F).var()
-                    if score > best_score:
-                        best_score = score
-                        best_frame = frame_np
-                if best_frame is not None:
-                    return best_frame
-            return cv2.cvtColor(np.array(pil_img.convert("RGB")), cv2.COLOR_RGB2BGR)
-        except Exception:
-            pass
-
-        nparr = np.frombuffer(image_bytes, np.uint8)
-        image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        if image is None:
-            raise ValueError("Unable to parse image")
-        return image
-
     def _confidence(self, scores: np.ndarray, gesture_id: int) -> float:
         probs = torch.softmax(torch.from_numpy(scores.astype(np.float32)), dim=0).numpy()
         if 0 <= gesture_id < len(probs):
             return float(probs[gesture_id])
         return 0.0
 
-    def create_sequence_state(self) -> dict[str, torch.Tensor]:
+    def create_sequence_state(self) -> dict[str, Any]:
         return {
             "h": torch.zeros_like(self.g_model.h0()),
             "c": torch.zeros_like(self.g_model.c0()),
+            "last_coord": None,
+            "last_box": None,
+            "missed_pose_frames": 0,
         }
+
+    @staticmethod
+    def _select_person_index(boxes: np.ndarray, previous_box: np.ndarray | None = None) -> int:
+        """Keep the same person across frames, falling back to the largest box."""
+        boxes = np.asarray(boxes, dtype=np.float32)
+        if boxes.ndim != 2 or boxes.shape[1] != 4 or len(boxes) == 0:
+            raise ValueError("expected one or more person boxes shaped (N, 4)")
+
+        areas = np.maximum(0, boxes[:, 2] - boxes[:, 0]) * np.maximum(0, boxes[:, 3] - boxes[:, 1])
+        if previous_box is None:
+            return int(np.argmax(areas))
+
+        previous_box = np.asarray(previous_box, dtype=np.float32)
+        intersection_left_top = np.maximum(boxes[:, :2], previous_box[:2])
+        intersection_right_bottom = np.minimum(boxes[:, 2:], previous_box[2:])
+        intersection_size = np.maximum(0, intersection_right_bottom - intersection_left_top)
+        intersection = intersection_size[:, 0] * intersection_size[:, 1]
+        previous_area = max(0.0, float(previous_box[2] - previous_box[0])) * max(
+            0.0, float(previous_box[3] - previous_box[1])
+        )
+        union = areas + previous_area - intersection
+        iou = np.divide(intersection, union, out=np.zeros_like(intersection), where=union > 0)
+        best_match = int(np.argmax(iou))
+        if iou[best_match] >= 0.05:
+            return best_match
+        return int(np.argmax(areas))
 
     def _extract_keypoints(self, coord_norm: np.ndarray) -> list[dict]:
         if coord_norm.ndim == 3:
@@ -216,92 +221,46 @@ class PoliceGestureService:
         for point in points.values():
             cv2.circle(image, point, 4, (0, 200, 255), -1)
 
-    def _coord_from_yolo_pose(self, ctpgr_image: np.ndarray) -> np.ndarray:
+    def _coord_from_yolo_pose(
+        self,
+        ctpgr_image: np.ndarray,
+        state: dict[str, Any] | None = None,
+    ) -> np.ndarray:
         with self._model_lock:
             results = self.yolo_model.predict(ctpgr_image, verbose=False, imgsz=self.input_size[0], device="cpu")
         if not results or results[0].keypoints is None or results[0].keypoints.xy is None:
-            raise ValueError("YOLO pose did not detect a person")
+            return self._reuse_recent_pose(state)
 
         keypoints_xy = results[0].keypoints.xy.cpu().numpy()
-        keypoints_conf = results[0].keypoints.conf
-        keypoints_conf = keypoints_conf.cpu().numpy() if keypoints_conf is not None else np.ones(keypoints_xy.shape[:2], dtype=np.float32)
         if keypoints_xy.size == 0:
-            raise ValueError("YOLO pose did not return keypoints")
+            return self._reuse_recent_pose(state)
 
         person_index = 0
         boxes = getattr(results[0], "boxes", None)
         if boxes is not None and boxes.xyxy is not None and len(boxes.xyxy):
             xyxy = boxes.xyxy.cpu().numpy()
-            areas = np.maximum(0, xyxy[:, 2] - xyxy[:, 0]) * np.maximum(0, xyxy[:, 3] - xyxy[:, 1])
-            person_index = int(np.argmax(areas))
+            previous_box = state.get("last_box") if state is not None else None
+            person_index = self._select_person_index(xyxy, previous_box)
+            if state is not None:
+                state["last_box"] = xyxy[person_index].copy()
 
         coco = keypoints_xy[person_index]
-        conf = keypoints_conf[person_index]
-        min_conf = float(settings.police_yolo_keypoint_conf)
+        coord_norm = coco_to_ctpgr(coco, self.input_size)
+        if state is not None:
+            state["last_coord"] = coord_norm.copy()
+            state["missed_pose_frames"] = 0
+        return coord_norm
 
-        def pick(index: int) -> np.ndarray:
-            point = coco[index].astype(np.float32)
-            if conf[index] < min_conf or np.allclose(point, 0):
-                return np.array([np.nan, np.nan], dtype=np.float32)
-            return point
-
-        right_shoulder = pick(6)
-        right_elbow = pick(8)
-        right_wrist = pick(10)
-        left_shoulder = pick(5)
-        left_elbow = pick(7)
-        left_wrist = pick(9)
-        right_hip = pick(12)
-        right_knee = pick(14)
-        right_ankle = pick(16)
-        left_hip = pick(11)
-        left_knee = pick(13)
-        left_ankle = pick(15)
-
-        shoulder_points = np.stack([right_shoulder, left_shoulder])
-        valid_shoulders = shoulder_points[~np.isnan(shoulder_points).any(axis=1)]
-        if len(valid_shoulders) == 0:
-            raise ValueError("YOLO pose shoulders are not reliable enough")
-        neck = np.nanmean(valid_shoulders, axis=0)
-
-        head_candidates = np.stack([pick(0), pick(1), pick(2), pick(3), pick(4)])
-        valid_head = head_candidates[~np.isnan(head_candidates).any(axis=1)]
-        if len(valid_head):
-            head_x = float(np.nanmean(valid_head[:, 0]))
-            head_y = float(np.nanmin(valid_head[:, 1]))
-        else:
-            head_x, head_y = float(neck[0]), float(neck[1])
-        if not np.isnan(shoulder_points).any():
-            shoulder_width = float(np.linalg.norm(left_shoulder - right_shoulder))
-        else:
-            shoulder_width = 40.0
-        head_top = np.array([head_x, max(0.0, head_y - 0.25 * shoulder_width)], dtype=np.float32)
-
-        ctpgr_points = np.stack(
-            [
-                right_shoulder,
-                right_elbow,
-                right_wrist,
-                left_shoulder,
-                left_elbow,
-                left_wrist,
-                right_hip,
-                right_knee,
-                right_ankle,
-                left_hip,
-                left_knee,
-                left_ankle,
-                head_top,
-                neck.astype(np.float32),
-            ],
-            axis=0,
-        )
-        if np.isnan(ctpgr_points).any():
-            raise ValueError("YOLO pose missing required body keypoints")
-        w, h = self.input_size
-        ctpgr_points[:, 0] = np.clip(ctpgr_points[:, 0] / w, 0.0, 1.0)
-        ctpgr_points[:, 1] = np.clip(ctpgr_points[:, 1] / h, 0.0, 1.0)
-        return ctpgr_points.T[np.newaxis].astype(np.float32)
+    @staticmethod
+    def _reuse_recent_pose(state: dict[str, Any] | None) -> np.ndarray:
+        hold_frames = max(0, int(settings.police_pose_hold_frames))
+        if state is not None and state.get("last_coord") is not None:
+            missed = int(state.get("missed_pose_frames", 0))
+            if missed < hold_frames:
+                state["missed_pose_frames"] = missed + 1
+                return np.asarray(state["last_coord"], dtype=np.float32).copy()
+            state["last_box"] = None
+        raise ValueError("YOLO pose did not detect a person")
 
     def _result_payload(self, ctpgr_image: np.ndarray, result) -> dict[str, Any]:
         gesture_id = int(result[self.pg.OUT_ARGMAX])
@@ -311,7 +270,7 @@ class PoliceGestureService:
         annotated = ctpgr_image.copy()
         self._draw_skeleton(annotated, keypoints)
         en, cn = POLICE_GESTURES.get(gesture_id, POLICE_GESTURES[0])
-        cv2.putText(annotated, f"{en} ({confidence:.0%})", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2)
+        annotated = draw_cn_text_bgr(annotated, f"{cn}（{confidence:.0%}）", (20, 48), (0, 0, 255), 30)
         return {
             "gesture": en,
             "gesture_cn": cn,
@@ -337,7 +296,7 @@ class PoliceGestureService:
             keypoints = self._extract_keypoints(coord_norm)
             self._draw_skeleton(annotated, keypoints)
         en, cn = POLICE_GESTURES.get(gesture_id, POLICE_GESTURES[0])
-        cv2.putText(annotated, f"{en} ({confidence:.0%})", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2)
+        annotated = draw_cn_text_bgr(annotated, f"{cn}（{confidence:.0%}）", (20, 48), (0, 0, 255), 30)
         payload = {
             "gesture": en,
             "gesture_cn": cn,
@@ -355,14 +314,18 @@ class PoliceGestureService:
     def _no_gesture_payload(self, ctpgr_image: np.ndarray, reason: str | None = None) -> dict[str, Any]:
         return self._plain_payload(ctpgr_image, 0, 1.0, None, reason)
 
-    def _coord_from_prepared_image(self, ctpgr_image: np.ndarray) -> np.ndarray:
+    def _coord_from_prepared_image(
+        self,
+        ctpgr_image: np.ndarray,
+        state: dict[str, Any] | None = None,
+    ) -> np.ndarray:
         if self.pose_backend == "yolo":
-            return self._coord_from_yolo_pose(ctpgr_image)
+            return self._coord_from_yolo_pose(ctpgr_image, state)
         with self._model_lock:
             pose = self.predictor.p_predictor.get_coordinates(ctpgr_image)
         return pose[self.pg.COORD_NORM][np.newaxis]
 
-    def _classify_coord(self, coord_norm: np.ndarray, state: dict[str, torch.Tensor] | None = None):
+    def _classify_coord(self, coord_norm: np.ndarray, state: dict[str, Any] | None = None):
         features_dict = self.bla.handcrafted_features(coord_norm)
         features = np.concatenate(
             (
@@ -382,48 +345,22 @@ class PoliceGestureService:
         scores = class_out[0].cpu().numpy()
         return {self.pg.OUT_ARGMAX: int(np.argmax(scores)), self.pg.OUT_SCORES: scores, self.pg.COORD_NORM: coord_norm}
 
-    def _classify_prepared_image(self, ctpgr_image: np.ndarray) -> dict[str, Any]:
-        try:
-            coord_norm = self._coord_from_prepared_image(ctpgr_image)
-        except ValueError as exc:
-            return self._no_gesture_payload(ctpgr_image, str(exc))
-        state = self.create_sequence_state()
-        sequence_results = [self._classify_coord(coord_norm, state) for _ in range(self.sequence_steps)]
-        tail = sequence_results[-8:]
-        nonzero_tail = [r for r in tail if int(r[self.pg.OUT_ARGMAX]) > 0]
-        if nonzero_tail:
-            result = max(nonzero_tail, key=lambda r: self._confidence(r[self.pg.OUT_SCORES], int(r[self.pg.OUT_ARGMAX])))
-        else:
-            result = sequence_results[-1]
-        return self._result_payload(ctpgr_image, result)
-
     def recognize_prepared_frame_continuous(
         self,
         ctpgr_image: np.ndarray,
-        state: dict[str, torch.Tensor] | None = None,
+        state: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         try:
-            coord_norm = self._coord_from_prepared_image(ctpgr_image)
+            coord_norm = self._coord_from_prepared_image(ctpgr_image, state)
         except ValueError as exc:
             return self._no_gesture_payload(ctpgr_image, str(exc))
         result = self._classify_coord(coord_norm, state)
         return self._result_payload(ctpgr_image, result)
 
-    def recognize_image(self, image: np.ndarray) -> dict[str, Any]:
-        ctpgr_image = cv2.resize(image, self.input_size, interpolation=cv2.INTER_AREA)
-        return self._classify_prepared_image(ctpgr_image)
-
-    def recognize(self, image_bytes: bytes) -> dict[str, Any]:
-        image = self._detect_best_frame(image_bytes)
-        return self.recognize_image(image)
-
-    def recognize_frame(self, frame: np.ndarray) -> dict[str, Any]:
-        return self.recognize_image(frame)
-
     def recognize_frame_continuous(
         self,
         frame: np.ndarray,
-        state: dict[str, torch.Tensor] | None = None,
+        state: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         ctpgr_image = cv2.resize(frame, self.input_size, interpolation=cv2.INTER_AREA)
         return self.recognize_prepared_frame_continuous(ctpgr_image, state)

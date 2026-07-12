@@ -6,10 +6,10 @@
 
 | 模块 | 功能 | 技术方案 |
 |------|------|----------|
-| 车牌识别 | 图片/视频/实时摄像头输入，检测+OCR，结果标注与历史查询 | OpenCV + EasyOCR |
-| 交警手势 | 8 种标准手势，骨骼关键点，实时视频流 | MediaPipe Pose + 规则分类 |
-| 车主控车 | 6+ 种手势，手部关键点，模拟车辆控制面板，误触发抑制 | MediaPipe Hands |
-| 告警智能体 | 日志监控、异常感知、LLM 摘要、WebSocket/邮件/Webhook 推送 | FastAPI + LLM API |
+| 车牌识别 | 单图/批量图片、视频、摄像头与 RTSP 输入，结果标注与历史查询 | RPNet + YOLO + LPRNet |
+| 交警手势 | 8 种标准手势，骨骼关键点，连续视频识别 | YOLO Pose + LSTM/CTPGR |
+| 车主控车 | 8 种手势，图片/视频/WebSocket，状态机、持续帧与二次确认 | MediaPipe Hands |
+| 告警智能体 | 分类日志、异常感知、巡检、回放、LLM 摘要、WebSocket/SSE/邮件/Webhook | FastAPI + LLM API |
 | 扩展 | 多种登录、Swagger 文档、AES 加密存储 | JWT + OpenAPI + AES-GCM |
 
 ## 快速启动
@@ -22,10 +22,10 @@ python run.py
 
 或双击 `start.bat`（Windows）。
 
-访问 http://localhost:8000
+访问 http://localhost:8001
 
 - 默认账号：`admin` / `admin123`
-- API 文档：http://localhost:8000/api/docs
+- API 文档：http://localhost:8001/api/docs
 
 ## 项目结构
 
@@ -63,6 +63,7 @@ vehicle-vision-system/
 复制 `.env.example` 为 `.env` 并按需修改：
 
 ```env
+LLM_PROVIDER=openai       # openai/qwen/deepseek/zhipu/custom
 LLM_API_KEY=sk-xxx          # OpenAI 兼容 API Key（留空使用模板告警）
 WEBHOOK_URL=https://...       # 企业微信/钉钉机器人 Webhook
 SMTP_HOST=smtp.example.com    # 邮件通知
@@ -80,10 +81,17 @@ SMTP_HOST=smtp.example.com    # 邮件通知
 | 端点 | 说明 |
 |------|------|
 | `POST /api/lpr/recognize` | 上传图片识别车牌 |
-| `POST /api/police-gesture/recognize` | 交警手势识别 |
+| `POST /api/police-gesture/recognize-video` | 长视频交警手势识别 |
 | `POST /api/owner-gesture/recognize` | 车主手势控车 |
+| `POST /api/owner-gesture/recognize-video` | 车主手势视频识别 |
+| `POST /api/owner-gesture/confirm` | 确认或取消待执行手势 |
+| `WS /api/owner-gesture/ws-stream` | 车主实时手势识别与控车 |
 | `GET /api/monitor/alerts` | 告警历史 |
+| `GET /api/monitor/alerts/analytics` | 告警分析统计 |
+| `GET /api/monitor/alerts/{id}/replay` | 告警事件回放 |
 | `GET /api/monitor/logs` | 系统日志 |
+| `GET /api/monitor/logs/stream` | 实时日志 SSE |
+| `POST /api/monitor/assistant` | 告警智能助手 |
 | `WS /ws/alerts` | 实时告警推送 |
 | `WS /ws/stream/{module}` | 实时视频流识别 |
 
@@ -100,6 +108,6 @@ SMTP_HOST=smtp.example.com    # 邮件通知
 
 ## 注意事项
 
-- 首次运行 EasyOCR 会自动下载模型（约 100MB），请保持网络畅通
+- 模型权重与 MediaPipe task 文件需放在项目约定的模型目录；缺失时接口会返回模型状态或降级结果
 - 实时摄像头功能需 HTTPS 或 localhost 环境
-- Python 3.10+ 推荐，已在 Python 3.14 测试通过
+- 推荐使用项目启动脚本指定的 Python 3.11 环境

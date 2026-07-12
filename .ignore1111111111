@@ -1,7 +1,0 @@
-database/vehicle-vision-system/backend/app/models/*.pth
-database/vehicle-vision-system/uploads/
-database/vehicle-vision-system/data/
-database/vehicle-vision-system/server-*.log
-__pycache__/
-*.pyc
-.env

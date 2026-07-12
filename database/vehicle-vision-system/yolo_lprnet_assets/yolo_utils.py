@@ -12,21 +12,27 @@ from ultralytics import YOLO
 
 
 class YOLOPlateDetector:
-    def __init__(self, model_path, conf_threshold=0.5, iou_threshold=0.45):
+    def __init__(self, model_path, conf_threshold=0.3, iou_threshold=0.5, imgsz=1280, max_det=20, min_box_width=18, min_box_height=8, max_aspect_ratio=8.0):
         """初始化YOLO车牌检测器
         
         Args:
             model_path: YOLO模型权重文件路径
             conf_threshold: 置信度阈值
             iou_threshold: IoU阈值
+            imgsz: 推理输入尺寸
+            max_det: 单帧最大检测数
         """
         if not os.path.exists(model_path):
             raise FileNotFoundError(f"未找到YOLO模型文件: {model_path}")
         
-        # 加载YOLO模型
         self.model = YOLO(model_path)
         self.conf_threshold = conf_threshold
         self.iou_threshold = iou_threshold
+        self.imgsz = imgsz
+        self.max_det = max_det
+        self.min_box_width = min_box_width
+        self.min_box_height = min_box_height
+        self.max_aspect_ratio = max_aspect_ratio
     
     def detect_plates(self, image, return_image=False):
         """检测图像中的车牌区域
@@ -48,7 +54,7 @@ class YOLOPlateDetector:
             img = image.copy()
             
         # 执行检测
-        results = self.model(img, conf=self.conf_threshold, iou=self.iou_threshold)
+        results = self.model(img, conf=self.conf_threshold, iou=self.iou_threshold, imgsz=self.imgsz, max_det=self.max_det, verbose=False)
         
         # 提取检测结果
         plates = []
@@ -64,6 +70,13 @@ class YOLOPlateDetector:
                 
                 # 只保留车牌类别（类别ID为0）
                 if cls == 0:
+                    box_w = int(x2 - x1)
+                    box_h = int(y2 - y1)
+                    aspect_ratio = box_w / max(box_h, 1)
+                    if box_w < self.min_box_width or box_h < self.min_box_height:
+                        continue
+                    if aspect_ratio > self.max_aspect_ratio or aspect_ratio < 1.5:
+                        continue
                     plates.append([int(x1), int(y1), int(x2), int(y2), conf])
                     
                     # 在图像上绘制边界框

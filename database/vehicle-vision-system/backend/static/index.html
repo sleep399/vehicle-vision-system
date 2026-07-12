@@ -5,6 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>车载视觉感知与人机交互系统</title>
   <link rel="stylesheet" href="/static/css/style.css">
+  <link rel="stylesheet" href="/static/css/monitoring-workbench.css?v=20260712-monitor3">
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
 </head>
 <body>
   <div id="app">
@@ -15,6 +17,7 @@
         <p class="subtitle">车牌识别 · 交警手势 · 车主控车 · 智能告警</p>
         <div class="tabs">
           <button class="tab active" data-tab="password">密码登录</button>
+          <button class="tab" data-tab="register">注册</button>
           <button class="tab" data-tab="code">验证码登录</button>
           <button class="tab" data-tab="wechat">微信扫码</button>
         </div>
@@ -22,6 +25,13 @@
           <input type="text" id="login-user" placeholder="用户名 (默认 admin)" value="admin">
           <input type="password" id="login-pass" placeholder="密码 (默认 admin123)" value="admin123">
           <button class="btn primary" onclick="App.login()">登录</button>
+        </div>
+        <div id="tab-register" class="tab-panel">
+          <input type="text" id="register-user" placeholder="用户名">
+          <input type="email" id="register-email" placeholder="邮箱（可选）">
+          <input type="tel" id="register-phone" placeholder="手机号（可选）">
+          <input type="password" id="register-pass" placeholder="密码">
+          <button class="btn primary" onclick="App.register()">注册并登录</button>
         </div>
         <div id="tab-code" class="tab-panel">
           <input type="text" id="code-target" placeholder="邮箱或手机号">
@@ -82,19 +92,46 @@
             <div class="panel lpr-input-panel">
               <h3>输入源</h3>
               <div class="upload-area" id="lpr-upload">
-                <input type="file" id="lpr-file" accept="image/*,video/*" hidden>
+                <input type="file" id="lpr-file" accept="image/*,video/*" multiple hidden>
                 <div class="upload-icon">📷</div>
                 <p class="upload-title">拖拽图片或视频到此处</p>
                 <p class="upload-hint">支持 JPG / PNG / MP4，也可点击下方按钮选择</p>
                 <p class="upload-hint">CCPD 文件名自动走 CCPD 识别，其它文件自动走 LPRNet 识别</p>
                 <button class="btn" onclick="document.getElementById('lpr-file').click()">选择文件</button>
               </div>
-              <div class="lpr-actions">
-                <button class="btn primary" onclick="App.startStream('lpr')">📹 摄像头实时识别</button>
-                <button class="btn" onclick="App.stopVideoStream()">停止视频/摄像头</button>
-                <button class="btn" onclick="App.loadCcpdSamples()">🧪 CCPD 测试样本</button>
+              <div class="panel" style="margin-top:1rem">
+                <h4>沙盘 RTSP 实时识别</h4>
+                <div class="row" style="align-items:center; gap:.75rem; flex-wrap:wrap">
+                  <input type="text" id="lpr-rtsp-url" placeholder="rtsp://10.126.59.120:8554/live/live1" value="rtsp://10.126.59.120:8554/live/live1" style="flex:1; min-width:260px">
+                  <select id="lpr-rtsp-source" onchange="App.syncLprRtspUrl()" style="width:220px">
+                    <option value="rtsp://10.126.59.120:8554/live/live1">桥面（live1）</option>
+                    <option value="rtsp://10.126.59.120:8554/live/live2">停车场出口（live2）</option>
+                    <option value="rtsp://10.126.59.120:8554/live/live3">行人检测（live3）</option>
+                    <option value="rtsp://10.126.59.120:8554/live/live4">消防车识别（live4）</option>
+                    <option value="rtsp://10.126.59.120:8554/live/live5">桥出口（live5）</option>
+                    <option value="rtsp://10.126.59.120:8554/live/live6">桥入口（live6）</option>
+                    <option value="rtsp://10.126.59.120:8554/live/live7">道路2（live7）</option>
+                    <option value="rtsp://10.126.59.120:8554/live/live8">隧道-事故识别（live8）</option>
+                    <option value="rtsp://10.126.59.120:8554/live/live9">隧道-车辆数量（live9）</option>
+                    <option value="rtsp://10.126.59.120:8554/live/live10">道路3（live10）</option>
+                    <option value="rtsp://10.126.59.120:8554/live/live11">停车场入口（live11）</option>
+                    <option value="rtsp://10.126.59.120:8554/live/live12">道路1（live12）</option>
+                  </select>
+                  <button class="btn primary" onclick="App.startLprRtspStream()">启动识别</button>
+                  <button class="btn" onclick="App.stopVideoStream()">停止</button>
+                </div>
+                <div id="lpr-rtsp-status" class="section-desc model-warn" style="margin-top:1rem">尚未启动 RTSP 识别</div>
+                <div id="lpr-rtsp-progress" class="video-progress hidden">
+                  <div class="video-progress-bar"><div id="lpr-rtsp-progress-fill"></div></div>
+                  <span id="lpr-rtsp-progress-text">等待连接…</span>
+                </div>
+                <div id="lpr-rtsp-result" class="results-box"></div>
               </div>
               <div class="source-preview-wrap">
+                <div id="lpr-rtsp-player" class="rtsp-player hidden">
+                  <div id="lpr-rtsp-debug" class="section-desc model-warn" style="margin-bottom:.5rem">预览未加载</div>
+                  <img id="lpr-rtsp-video" class="rtsp-preview-img" alt="RTSP 预览">
+                </div>
                 <video id="lpr-video-output" class="source-video" controls playsinline muted hidden></video>
                 <canvas id="lpr-canvas" hidden></canvas>
               </div>
@@ -128,6 +165,7 @@
                   <span class="result-group-note">CCPD 文件名优先，普通图片回退模型识别</span>
                 </div>
                 <div id="lpr-image-result" class="results-box"></div>
+                <div id="lpr-batch-nav" class="batch-nav"></div>
                 <div id="lpr-hero" class="lpr-hero hidden">
                   <div id="lpr-hero-plate" class="hero-plate">--</div>
                   <div id="lpr-hero-meta" class="hero-meta"></div>
@@ -152,12 +190,22 @@
         <!-- 交警手势 -->
         <section id="view-police" class="view">
           <h2>交警手势识别</h2>
-          <div class="dual-panel">
-            <div class="panel">
-              <input type="file" id="police-file" accept="image/*,video/*" hidden>
-              <button class="btn" onclick="document.getElementById('police-file').click()">上传图片/视频</button>
-              <button class="btn primary" onclick="App.startStream('police')">📹 实时识别</button>
-              <button class="btn" onclick="App.stopStream()">停止</button>
+          <p class="section-desc">支持摄像头实时识别、RTSP 视频流与本地视频播放识别；点击识别画面可放大查看</p>
+          <div class="lpr-layout police-layout">
+            <div class="panel lpr-input-panel police-input-panel">
+              <h3>输入源</h3>
+              <div class="upload-area police-upload-area" onclick="document.getElementById('police-file').click()">
+              <input type="file" id="police-file" accept="video/*,.mp4,.webm,.mov,.mkv,.avi,.m4v" hidden>
+                <div class="upload-icon">👮</div>
+                <p class="upload-title">拖拽视频到此处</p>
+                <p class="upload-hint">支持 MP4 / WebM / MOV / MKV / AVI，也可点击下方按钮选择</p>
+                <p class="upload-hint">视频播放时按帧实时识别并同步标注</p>
+                <button class="btn" type="button">选择文件</button>
+              </div>
+              <div class="lpr-actions">
+                <button class="btn primary" onclick="App.startStream('police')">📹 摄像头实时识别</button>
+                <button class="btn" onclick="App.stopStream()">停止视频/摄像头</button>
+              </div>
               <div class="stream-url-row">
                 <select id="police-pose-backend">
                   <option value="ctpgr">CTPGR Pose</option>
@@ -170,18 +218,36 @@
                 <input type="text" id="police-stream-url" placeholder="rtsp://... 或 http://... 视频流地址">
                 <button class="btn" onclick="App.startUrlStream('police')">连接视频流</button>
               </div>
+              <div class="source-preview-wrap police-camera-wrap">
               <video id="police-video" autoplay playsinline muted hidden></video>
-              <canvas id="police-canvas" hidden></canvas>
-              <div id="police-gesture-list" class="gesture-ref"></div>
-            </div>
-            <div class="panel">
-              <img id="police-preview" class="preview-img" alt="手势预览">
               <video id="police-upload-preview" class="preview-img" controls hidden></video>
+              <canvas id="police-canvas" hidden></canvas>
+              <img id="police-stream-preview" class="stream-preview-img police-zoomable" alt="交警手势识别画面" title="点击放大" hidden>
+              </div>
               <div id="police-upload-controls" class="video-control-row" hidden>
                 <button id="police-upload-play" class="btn primary" onclick="App.toggleUploadedPolicePlayback()">播放视频</button>
               </div>
+              <div id="police-gesture-list" class="gesture-ref"></div>
+            </div>
+            <div class="panel lpr-result-panel police-result-panel">
+              <h3>识别结果</h3>
+              <div class="lpr-preview-wrap police-preview-wrap">
+              <img id="police-preview" class="preview-img police-zoomable" alt="交警手势识别画面" title="点击放大" hidden>
+              </div>
+              <div class="result-group">
+                <div class="result-group-head">
+                  <h4>当前识别结果</h4>
+                  <span class="result-group-note">YOLO/CTPGR 姿态关键点 + 手势分类</span>
+                </div>
               <div id="police-result" class="gesture-result"></div>
+              </div>
+              <div class="result-group">
+                <div class="result-group-head">
+                  <h4>历史记录</h4>
+                  <span class="result-group-note">最近识别结果，保留内部滚动</span>
+                </div>
               <div id="police-history" class="history-list"></div>
+              </div>
             </div>
           </div>
         </section>
@@ -192,6 +258,13 @@
           <div class="dual-panel">
             <div class="panel">
               <input type="file" id="owner-file" accept="image/*,video/*" hidden>
+              <div class="camera-device-row owner-camera-row" id="owner-camera-row">
+                <select id="owner-camera-device" aria-label="车主手势摄像头">
+                  <option value="">自动选择（优先笔记本前置摄像头）</option>
+                </select>
+                <button class="btn" type="button" onclick="App.refreshCameraDevices('owner')">刷新摄像头</button>
+                <span id="owner-camera-status" class="camera-status">尚未检测摄像头</span>
+              </div>
               <button class="btn" onclick="document.getElementById('owner-file').click()">上传图片/视频</button>
               <button class="btn primary" onclick="App.startStream('owner')">📹 实时手势控制</button>
               <button class="btn" onclick="App.stopStream()">停止</button>
@@ -206,7 +279,13 @@
                 <h3>🚗 模拟车辆控制面板</h3>
                 <div class="vehicle-control">
                   <label>系统状态: <span id="v-awake">休眠</span></label>
-                  <label>当前页面: <span id="v-page">home</span></label>
+                  <label>当前选择: <span id="v-page">volume_up</span></label>
+                  <div class="function-selector" id="owner-function-selector">
+                    <div class="function-card" data-control="volume_up"><strong>音量 +</strong><small>握拳确认增加音量</small></div>
+                    <div class="function-card" data-control="volume_down"><strong>音量 -</strong><small>握拳确认降低音量</small></div>
+                    <div class="function-card" data-control="temp_up"><strong>温度 +</strong><small>握拳确认升高温度</small></div>
+                    <div class="function-card" data-control="temp_down"><strong>温度 -</strong><small>握拳确认降低温度</small></div>
+                  </div>
                   <label>音量: <input type="range" id="v-volume" min="0" max="100" value="50" onchange="App.updateVehicle()"> <span id="v-volume-val">50</span></label>
                   <label>空调温度: <input type="range" id="v-temp" min="16" max="32" value="24" onchange="App.updateVehicle()"> <span id="v-temp-val">24</span>°C</label>
                   <div class="phone-btns">
@@ -214,6 +293,7 @@
                     <button class="btn" id="v-hangup" onclick="App.setPhone('idle')">📵 挂断</button>
                     <span id="v-phone">空闲</span>
                   </div>
+                  <div class="gesture-hints">手掌张开 → 唤醒系统；向左指/左滑 → 上一个功能；向右指/右滑 → 下一个功能；握拳 → 确认当前功能；单指画圈 → 调节当前选中项；点赞 → 接听电话；倒赞 → 挂断电话；挥手 → 返回待机。</div>
                 </div>
               </div>
             </div>
@@ -223,43 +303,371 @@
         <!-- 告警中心 -->
         <section id="view-alerts" class="view">
           <h2>告警中心</h2>
-          <div class="toolbar">
-            <button class="btn" onclick="App.loadAlerts()">刷新</button>
-            <button class="btn" onclick="App.testAlert()">触发测试告警</button>
+          <div class="toolbar toolbar-wrap alert-toolbar">
+            <div class="toolbar-row">
+              <div class="toolbar-field alert-field-select">
+                <label>级别</label>
+                <div class="select-input-wrap">
+                  <select id="alert-filter-level" onchange="App.onAlertFilterChange()">
+                    <option value="">全部级别</option>
+                    <option value="info">提示</option>
+                    <option value="warning">警告</option>
+                    <option value="critical">严重</option>
+                  </select>
+                  <span class="select-chevron select-chevron-right" aria-hidden="true">
+                    <svg viewBox="0 0 8 12" width="8" height="12"><path d="M1.5 1.5 6.5 6 1.5 10.5" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  </span>
+                  <span class="select-chevron select-chevron-down" aria-hidden="true">
+                    <svg viewBox="0 0 12 8" width="12" height="8"><path d="M1 1.5 6 6.5 11 1.5" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  </span>
+                </div>
+              </div>
+              <div class="toolbar-field alert-field-select alert-field-type">
+                <label>类型</label>
+                <div class="select-input-wrap">
+                  <select id="alert-filter-type" onchange="App.onAlertFilterChange()">
+                    <option value="">全部类型</option>
+                  </select>
+                  <span class="select-chevron select-chevron-right" aria-hidden="true">
+                    <svg viewBox="0 0 8 12" width="8" height="12"><path d="M1.5 1.5 6.5 6 1.5 10.5" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  </span>
+                  <span class="select-chevron select-chevron-down" aria-hidden="true">
+                    <svg viewBox="0 0 12 8" width="12" height="8"><path d="M1 1.5 6 6.5 11 1.5" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  </span>
+                </div>
+              </div>
+              <div class="toolbar-field alert-field-select">
+                <label>状态</label>
+                <div class="select-input-wrap">
+                  <select id="alert-filter-status" onchange="App.onAlertFilterChange()">
+                    <option value="">全部状态</option>
+                    <option value="open">未处理</option>
+                    <option value="resolved">已处理</option>
+                  </select>
+                  <span class="select-chevron select-chevron-right" aria-hidden="true">
+                    <svg viewBox="0 0 8 12" width="8" height="12"><path d="M1.5 1.5 6.5 6 1.5 10.5" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  </span>
+                  <span class="select-chevron select-chevron-down" aria-hidden="true">
+                    <svg viewBox="0 0 12 8" width="12" height="8"><path d="M1 1.5 6 6.5 11 1.5" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  </span>
+                </div>
+              </div>
+              <div class="toolbar-field toolbar-field-actions">
+                <label class="toolbar-label-spacer" aria-hidden="true">&nbsp;</label>
+                <div class="toolbar-btn-group">
+                  <button class="btn" id="alert-refresh-btn" type="button" onclick="App.refreshAlerts()">刷新</button>
+                  <details class="alert-more-menu" ontoggle="if(this.open){App.loadAlertNotifications();App.loadAlertConfig();}">
+                    <summary class="btn alert-more-toggle">系统诊断</summary>
+                    <div class="alert-more-panel">
+                      <p class="alert-more-hint">仅供查看运行状态与演示测试，不可在此修改系统配置。</p>
+                      <div class="alert-more-section">
+                        <h4>测试工具</h4>
+                        <select id="test-alert-type" title="测试告警类型"></select>
+                        <div class="alert-more-actions">
+                          <button class="btn small" type="button" onclick="App.triggerTypeAlert()">按类型测试</button>
+                          <button class="btn small" type="button" onclick="App.testAlert()">测试告警</button>
+                          <button class="btn small" type="button" onclick="App.cleanupNoiseAlerts()">清理噪声</button>
+                        </div>
+                      </div>
+                      <div class="alert-more-section">
+                        <div class="alert-more-section-head">
+                          <h4>通知渠道</h4>
+                          <button class="btn small" type="button" onclick="App.testNotifications('all')">测试推送</button>
+                        </div>
+                        <div id="alert-notifications" class="notification-grid alert-more-grid"></div>
+                      </div>
+                      <div class="alert-more-section">
+                        <h4>智能体配置（只读）</h4>
+                        <div id="alert-config" class="alert-more-config"></div>
+                      </div>
+                    </div>
+                  </details>
+                </div>
+              </div>
+            </div>
           </div>
-          <div class="stats-grid" id="alert-stats"></div>
+
+          <!-- 智能体决策日志 -->
           <div class="panel">
-            <h3>实时告警推送</h3>
-            <div id="live-alerts" class="alert-list"></div>
+            <div class="panel-header-row">
+              <h3>智能体决策日志</h3>
+              <button class="btn small" onclick="App.loadAgentActivity()">刷新</button>
+            </div>
+            <div id="agent-activity" class="agent-activity-list"></div>
           </div>
+
+          <!-- 统计卡片 -->
+          <div class="stats-grid stats-grid-6" id="alert-stats"></div>
+
+          <!-- 统计仪表盘 -->
+          <div class="panel" id="alert-analytics-panel">
+            <div class="panel-header-row">
+              <h3>告警统计仪表盘</h3>
+              <select id="alert-analytics-days" onchange="App.loadAlertAnalytics()">
+                <option value="7">近 7 天</option>
+                <option value="14">近 14 天</option>
+                <option value="30">近 30 天</option>
+              </select>
+            </div>
+            <div id="alert-analytics" class="analytics-dashboard"></div>
+          </div>
+
+          <!-- 实时 + 分布 -->
+          <div class="dual-panel">
+            <div class="panel">
+              <h3>实时告警推送</h3>
+              <div id="live-alerts" class="alert-list" style="max-height:400px; overflow-y:auto;"></div>
+            </div>
+            <div class="panel">
+              <h3>告警分布</h3>
+              <div id="alert-distribution" class="distribution-chart"></div>
+            </div>
+          </div>
+
+          <!-- 告警时间线 -->
           <div class="panel">
-            <h3>告警历史时间线</h3>
+            <div class="panel-header-row">
+              <h3>告警历史时间线</h3>
+              <div class="timeline-toolbar toolbar-inline">
+                <div class="toolbar-field"><label>开始日期</label><input type="date" id="alert-filter-start" onchange="App.resetAlertTimeline()"></div>
+                <span class="toolbar-divider">至</span>
+                <div class="toolbar-field"><label>结束日期</label><input type="date" id="alert-filter-end" onchange="App.resetAlertTimeline()"></div>
+                <button class="btn small" onclick="App.resetAlertTimeline()">筛选</button>
+              </div>
+            </div>
             <div id="alert-timeline" class="timeline"></div>
+            <div class="timeline-footer">
+              <span id="alert-timeline-info" class="timeline-info"></span>
+              <button class="btn small" id="alert-load-more" onclick="App.loadMoreAlerts()" style="display:none;">加载更多</button>
+            </div>
+          </div>
+
+          <!-- 告警回放面板 -->
+          <div class="panel" id="replay-panel" style="display:none;">
+            <div class="replay-header">
+              <h3>告警事件回放</h3>
+              <button class="btn small" onclick="App.closeReplay()">关闭</button>
+            </div>
+            <div id="replay-content"></div>
+            <div id="replay-player" class="replay-player" style="display:none;">
+              <h4> 事件时间线回放</h4>
+              <div class="replay-controls">
+                <button class="btn small" onclick="App.replayStep(-1)">◀ 上一步</button>
+                <button class="btn small primary" id="replay-play-btn" onclick="App.replayTogglePlay()">播放</button>
+                <button class="btn small" onclick="App.replayStep(1)">下一步</button>
+                <span id="replay-step-info" class="replay-step-info">0 / 0</span>
+              </div>
+              <div id="replay-step-view" class="replay-step-view"></div>
+            </div>
           </div>
         </section>
 
         <!-- 系统日志 -->
         <section id="view-logs" class="view">
           <h2>系统日志</h2>
-          <div class="toolbar">
-            <select id="log-category" onchange="App.loadLogs()">
-              <option value="">全部类别</option>
-              <option value="lpr">车牌识别</option>
-              <option value="police_gesture">交警手势</option>
-              <option value="owner_gesture">车主手势</option>
-              <option value="alert">告警</option>
-              <option value="user">用户操作</option>
-            </select>
-            <button class="btn" onclick="App.loadLogs()">刷新</button>
+          <p class="hint" style="color:var(--text-muted);margin:-0.5rem 0 1rem;font-size:0.9rem;">
+            监控日志覆盖车牌识别、交警手势、车主手势、用户操作、告警与智能体决策等类别，支持统计图表、实时监听、筛选与导出。
+          </p>
+          <div class="toolbar toolbar-wrap log-toolbar">
+            <div class="toolbar-row">
+              <div class="toolbar-field log-field-category"><label>类别</label>
+                <div class="select-input-wrap">
+                  <select id="log-category" onchange="App.loadLogs()">
+                <option value="">全部类别</option>
+                <option value="lpr">车牌识别</option>
+                <option value="police_gesture">交警手势</option>
+                <option value="owner_gesture">车主手势</option>
+                <option value="alert">告警</option>
+                <option value="user">用户操作</option>
+                <option value="system">系统运行</option>
+                <option value="agent">智能体决策</option>
+                  </select>
+                  <span class="select-chevron select-chevron-right" aria-hidden="true">
+                    <svg viewBox="0 0 8 12" width="8" height="12"><path d="M1.5 1.5 6.5 6 1.5 10.5" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  </span>
+                  <span class="select-chevron select-chevron-down" aria-hidden="true">
+                    <svg viewBox="0 0 12 8" width="12" height="8"><path d="M1 1.5 6 6.5 11 1.5" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  </span>
+                </div>
+              </div>
+              <div class="toolbar-field log-field-level"><label>级别</label>
+                <div class="select-input-wrap">
+                  <select id="log-level" onchange="App.loadLogs()">
+                <option value="">全部级别</option>
+                <option value="信息">信息</option>
+                <option value="警告">警告</option>
+                <option value="错误">错误</option>
+                <option value="严重">严重</option>
+                  </select>
+                  <span class="select-chevron select-chevron-right" aria-hidden="true">
+                    <svg viewBox="0 0 8 12" width="8" height="12"><path d="M1.5 1.5 6.5 6 1.5 10.5" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  </span>
+                  <span class="select-chevron select-chevron-down" aria-hidden="true">
+                    <svg viewBox="0 0 12 8" width="12" height="8"><path d="M1 1.5 6 6.5 11 1.5" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  </span>
+                </div>
+              </div>
+              <div class="toolbar-field log-field-keyword"><label>关键词</label><input id="log-search" placeholder="输入关键词" onkeydown="if(event.key==='Enter')App.loadLogs()" /></div>
+              <div class="toolbar-field log-field-user"><label>用户ID</label><input id="log-user" placeholder="可选" onkeydown="if(event.key==='Enter')App.loadLogs()" /></div>
+              <div class="toolbar-field toolbar-field-actions log-field-export">
+                <label class="toolbar-label-spacer" aria-hidden="true">&nbsp;</label>
+                <div class="toolbar-btn-group">
+                  <button class="btn action-btn" onclick="App.exportLogs('csv')">导出 CSV</button>
+                  <button class="btn action-btn" onclick="App.exportLogs('json')">导出 JSON</button>
+                </div>
+              </div>
+            </div>
+            <div class="toolbar-row">
+              <div class="toolbar-field log-field-datetime">
+                <label>开始时间</label>
+                <div class="datetime-input-wrap">
+                  <input id="log-start" type="datetime-local" title="开始时间" oninput="App.onLogDatetimeChange(this)" onchange="App.onLogDatetimeChange(this); App.loadLogs()" />
+                  <span class="datetime-hint">选择时间</span>
+                </div>
+              </div>
+              <div class="toolbar-field log-field-datetime">
+                <label>结束时间</label>
+                <div class="datetime-input-wrap">
+                  <input id="log-end" type="datetime-local" title="结束时间" oninput="App.onLogDatetimeChange(this)" onchange="App.onLogDatetimeChange(this); App.loadLogs()" />
+                  <span class="datetime-hint">选择时间</span>
+                </div>
+              </div>
+              <div class="toolbar-field toolbar-field-actions log-field-actions">
+                <label class="toolbar-label-spacer" aria-hidden="true">&nbsp;</label>
+                <div class="toolbar-btn-group">
+                  <button class="btn action-btn" onclick="App.resetLogFilters()">重置</button>
+                  <button class="btn action-btn" onclick="App.loadLogs()">查询</button>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="panel" id="log-stats-panel" style="display:none;">
+            <div class="panel-header-row log-stats-header">
+              <h3>日志监控概览</h3>
+              <div class="log-stats-controls">
+                <select id="log-stats-hours" onchange="App.loadLogStats()">
+                  <option value="24">近 24 小时</option>
+                  <option value="72">近 72 小时</option>
+                  <option value="168">近 7 天</option>
+                </select>
+                <button id="log-stream-btn" class="btn small" onclick="App.toggleLogStream()">实时监听</button>
+                <span id="log-stream-status" class="conn-status">未连接</span>
+              </div>
+            </div>
+            <div id="log-stats" class="log-stats"></div>
+            <div id="log-charts" class="log-charts-grid"></div>
           </div>
           <div id="log-table" class="log-table"></div>
         </section>
+
       </main>
     </div>
 
+    <div id="police-image-viewer" class="image-viewer" hidden role="dialog" aria-modal="true" aria-label="交警手势识别画面">
+      <button class="image-viewer-close" type="button" aria-label="关闭" onclick="App.closePoliceImageViewer()">×</button>
+      <img id="police-image-viewer-img" alt="放大的交警手势识别画面">
+      <div class="image-viewer-hint">点击空白区域或按 Esc 关闭</div>
+    </div>
+
     <!-- 告警 Toast -->
+    <div id="standby-page" class="standby-page" hidden>
+      <div class="standby-clock" id="standby-clock">--:--</div>
+      <div class="standby-date" id="standby-date">车主手势待机</div>
+      <div class="standby-tip">挥手已返回主页 / 待机模式</div>
+      <button class="btn primary" onclick="App.exitStandby()">返回车主手势控车</button>
+    </div>
     <div id="toast-container"></div>
   </div>
-  <script src="/static/js/app.js"></script>
+  <div id="assistant-bot" class="assistant-bot" aria-label="告警智能体">
+    <div id="agent-avatar-wrap" class="agent-avatar-wrap agent-mood-idle" title="拖拽移动 · 点击打开对话">
+      <div id="agent-status-ring" class="agent-status-ring agent-state-idle"></div>
+      <div class="agent-sprite">
+        <!-- 思考：头顶灯泡 -->
+        <div class="agent-fx agent-bulb" aria-hidden="true">
+          <svg viewBox="0 0 32 40" width="28" height="34">
+            <path d="M16 2C10 2 6 7 6 13c0 4 2 7 4 9v4h12v-4c2-2 4-5 4-9 0-6-4-11-10-11z" fill="#FFE566" stroke="#E6B800" stroke-width="1.2"/>
+            <rect x="12" y="26" width="8" height="4" rx="1" fill="#B0BEC5"/>
+            <rect x="11" y="30" width="10" height="3" rx="1" fill="#90A4AE"/>
+            <line x1="16" y1="2" x2="16" y2="0" stroke="#E6B800" stroke-width="1.5"/>
+            <line x1="10" y1="5" x2="8" y2="3" stroke="#E6B800" stroke-width="1.2"/>
+            <line x1="22" y1="5" x2="24" y2="3" stroke="#E6B800" stroke-width="1.2"/>
+            <line x1="6" y1="12" x2="4" y2="12" stroke="#E6B800" stroke-width="1.2"/>
+            <line x1="26" y1="12" x2="28" y2="12" stroke="#E6B800" stroke-width="1.2"/>
+          </svg>
+        </div>
+        <!-- 异常：蚊香眼 -->
+        <div class="agent-fx agent-dizzy-eyes" aria-hidden="true">
+          <span class="agent-spiral-eye"></span>
+          <span class="agent-spiral-eye"></span>
+        </div>
+        <!-- 聆听：声波 -->
+        <div class="agent-fx agent-listen-waves" aria-hidden="true">
+          <span></span><span></span><span></span>
+        </div>
+        <img id="agent-avatar" class="agent-avatar" src="/static/images/alert-agent.png" alt="Alert Agent" draggable="false" />
+      </div>
+      <span id="agent-badge" class="agent-badge hidden">0</span>
+      <div id="agent-speech" class="agent-speech">系统监控中…</div>
+    </div>
+    <div id="assistant-panel" class="assistant-panel hidden">
+      <div class="assistant-panel-inner">
+        <div class="assistant-header" onmousedown="App.startPanelDrag(event)">
+          <div class="assistant-title">
+            <img class="agent-avatar-mini" src="/static/images/alert-agent.png" alt="" draggable="false" />
+            <div>
+              <strong>告警智能体 Alert Agent</strong>
+              <div class="assistant-subtitle" id="agent-subtitle">感知 · 决策 · 告警推送</div>
+            </div>
+          </div>
+          <button type="button" class="assistant-close" onclick="App.toggleAssistant(false)" aria-label="关闭">×</button>
+        </div>
+        <div id="agent-live-status" class="agent-live-status">
+          <span id="agent-live-dot" class="agent-live-dot ok"></span>
+          <span id="agent-live-text">正在连接监控服务…</span>
+        </div>
+        <div class="agent-capabilities">
+          <span class="agent-cap-tag">异常感知</span>
+          <span class="agent-cap-tag">级别决策</span>
+          <span class="agent-cap-tag">LLM 摘要</span>
+          <span class="agent-cap-tag">多渠道推送</span>
+        </div>
+        <div class="agent-action-row">
+          <button type="button" class="btn small primary" onclick="App.runAgentPatrol()">立即巡检</button>
+          <button type="button" class="btn small" onclick="App.agentTriggerTestAlert()">模拟告警</button>
+          <button type="button" class="btn small" onclick="App.goToAlerts()">告警中心</button>
+        </div>
+        <div class="agent-latest-alert hidden" id="agent-latest-alert"></div>
+        <div id="assistant-context-bar" class="assistant-context-bar hidden">
+          <span class="assistant-context-label">当前讨论</span>
+          <strong id="assistant-context-title" class="assistant-context-title"></strong>
+          <button type="button" class="btn small assistant-context-clear" onclick="App.clearFocusedAlert()">取消选定</button>
+        </div>
+        <div class="assistant-quick-actions">
+          <button type="button" class="btn small" onclick="App.askAboutAlert('这个异常的根因是什么？', 'root_cause')" title="需先选定一条告警">根因</button>
+          <button type="button" class="btn small" onclick="App.askAboutAlert('应该怎么处理？', 'action')" title="需先选定一条告警">建议</button>
+          <button type="button" class="btn small" onclick="App.askAboutAlert('是否需要升级为严重告警？', 'severity')" title="需先选定一条告警">升级</button>
+          <button type="button" class="btn small" onclick="App.askAboutAlert('当前告警影响有多大？', 'impact')" title="需先选定一条告警">影响</button>
+        </div>
+        <div id="assistant-history" class="assistant-history"></div>
+        <div id="assistant-status" class="assistant-status">准备就绪，欢迎提问</div>
+        <div class="assistant-input-row">
+          <input id="assistant-input" class="assistant-input" placeholder="向智能体提问，按回车发送" />
+          <button type="button" class="assistant-icon-btn" onclick="App.startVoiceInput()" title="语音输入">语音</button>
+          <button type="button" class="assistant-icon-btn" onclick="App.askAssistant()" title="发送">发送</button>
+        </div>
+        <div class="assistant-footer">
+          <label class="voice-toggle" title="开启后使用自然中文语音朗读（推荐使用 Edge 浏览器以获得最佳效果）">
+            <input type="checkbox" id="assistant-voice-toggle" onchange="App.onVoiceToggleChange(this.checked)">
+            <span class="voice-toggle-track"><span class="voice-toggle-thumb"></span></span>
+            <span class="voice-toggle-text">语音朗读</span>
+            <span id="voice-toggle-status" class="voice-toggle-status">朗读关</span>
+          </label>
+          <button type="button" class="btn small" onclick="App.speakLastAnswer()" title="重新朗读上一条回复">重听</button>
+          <button type="button" class="btn small" onclick="App.goToAlerts()">告警中心</button>
+        </div>
+      </div>
+    </div>
+  <script src="/static/js/app.js?v=20260712-monitor3"></script>
+  <script src="/static/js/monitoring-workbench.js?v=20260712-monitor3"></script>
 </body>
 </html>

@@ -54,6 +54,6 @@ class VehicleState(Base):
     volume = Column(Integer, default=50)
     temperature = Column(Integer, default=24)
     phone_status = Column(String(16), default="idle")
-    current_page = Column(String(32), default="home")
+    current_page = Column(String(32), default="standby")
     is_awake = Column(Integer, default=0)
     updated_at = Column(DateTime, default=datetime.utcnow)

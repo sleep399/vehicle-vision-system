@@ -1,0 +1,8 @@
+
+data/CCPD
+data/yolo
+data/lprnet
+./runs/*
+./train/*
+runs
+train

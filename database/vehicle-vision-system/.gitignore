@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.env
+data/
+uploads/
+*.db
+backend/app/models/*.task
+.venv/
+venv/
+*.log

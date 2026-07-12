@@ -8,12 +8,69 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
+from fastapi.responses import RedirectResponse
 from app.config import settings
-from app.database import init_db
+from app.database import init_db, check_db_connection
 from app.models.user import User
 from app.database import SessionLocal
 from app.utils.auth import hash_password
 from app.routers import auth, lpr, police_gesture, owner_gesture, monitor, websocket
+from app.services.alert_agent import alert_agent
+from app.services.llm_service import llm_service
+from app.services.lpr_service import lpr_service
+from app.services.lpr_video_service import lpr_video_service
+from app.services.police_gesture_service import police_gesture_service
+from app.utils.logger import get_logger, write_log, write_system_log
+
+main_logger = get_logger("main")
+
+
+async def _startup_checks(db):
+    write_system_log(db, "系统启动完成", detail={"version": "1.0.0"})
+    db_ok = check_db_connection()
+    alert_agent.record_db_connection(db_ok)
+    if not db_ok:
+        await alert_agent.check_and_alert(db, "db")
+    if settings.alert_webhook_enabled and not settings.webhook_url:
+        await alert_agent.handle_config_missing(db, "webhook_url", severity="warning")
+    if settings.alert_email_enabled and not all((settings.smtp_host, settings.smtp_user, settings.alert_email_to)):
+        await alert_agent.handle_config_missing(db, "smtp/email", severity="warning")
+    if not settings.llm_configured:
+        write_system_log(db, "LLM 未配置，告警摘要使用本地模板", level="WARN")
+    else:
+        status = await llm_service.test_connection()
+        write_system_log(db, "LLM 连接正常" if status.get("ok") else "LLM 连接失败，使用模板降级", level="INFO" if status.get("ok") else "WARN", detail=status)
+
+    image_model_ready = lpr_service.model_available()
+    write_system_log(
+        db,
+        "车牌图片识别模型已就绪（RPNet）" if image_model_ready else "车牌图片识别模型未加载（RPNet）",
+        level="INFO" if image_model_ready else "WARN",
+        detail={"engine": "rpnet", "model": "fh02.pth", "ready": image_model_ready},
+    )
+    if not image_model_ready:
+        await alert_agent.handle_model_load_failure(
+            db, "fh02.pth", FileNotFoundError("RPNet 模型 fh02.pth 未就绪"),
+        )
+
+    video_status = lpr_video_service.model_status()
+    write_system_log(
+        db,
+        "车牌视频识别模型已就绪（YOLO+LPRNet）" if video_status.get("model_available") else "车牌视频识别模型未加载（YOLO+LPRNet）",
+        level="INFO" if video_status.get("model_available") else "WARN",
+        detail=video_status,
+    )
+    if not video_status.get("model_available"):
+        await alert_agent.handle_model_load_failure(
+            db, "yolo_lprnet", FileNotFoundError(video_status.get("message") or "YOLO+LPRNet 权重未就绪"),
+        )
+
+    try:
+        pose_info = police_gesture_service.pose_backend_info()
+        write_system_log(db, "交警手势识别后端已配置", level="INFO", detail=pose_info)
+    except Exception as exc:
+        write_system_log(db, "交警手势识别后端检查失败", level="WARN", detail={"error": str(exc)})
+        await alert_agent.handle_model_load_failure(db, "police_pose", exc)
 
 
 @asynccontextmanager
@@ -35,8 +92,10 @@ async def lifespan(app: FastAPI):
                 )
             )
             db.commit()
+        await _startup_checks(db)
     finally:
         db.close()
+    await alert_agent.start_patrol_loop(SessionLocal)
     yield
 
 
@@ -72,6 +131,14 @@ uploads_dir = settings.upload_dir
 app.mount("/uploads", StaticFiles(directory=str(uploads_dir)), name="uploads")
 
 
+@app.get("/hls/{path_name}/index.m3u8", include_in_schema=False)
+async def hls_playlist(path_name: str):
+    hls_file = settings.hls_dir / path_name / "index.m3u8"
+    if hls_file.exists():
+        return FileResponse(str(hls_file))
+    return {"detail": "HLS playlist not found"}
+
+
 @app.get("/", include_in_schema=False)
 async def index():
     index_file = static_dir / "index.html"
@@ -83,6 +150,14 @@ async def index():
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     response = await call_next(request)
-    if response.status_code == 401 and request.url.path.startswith("/api/") and "auth" not in request.url.path:
-        pass
+    if response.status_code in {401, 403} and request.url.path.startswith("/api/"):
+        db = SessionLocal()
+        try:
+            client_ip = request.headers.get("x-forwarded-for", "").split(",")[0].strip() or (request.client.host if request.client else "unknown")
+            await alert_agent.handle_unauthorized_access(db, request.url.path, ip=client_ip, user_agent=request.headers.get("user-agent"))
+            write_log(db, "user", f"未授权访问: {request.url.path}", level="WARN", detail={"ip": client_ip, "status": response.status_code})
+        except Exception as exc:
+            main_logger.warning("未授权访问检测失败: %s", exc)
+        finally:
+            db.close()
     return response
