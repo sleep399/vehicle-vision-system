@@ -2210,4 +2210,16 @@
 /* ── Vision modules (LPR / Police / Owner) ── */
 .section-desc { color: var(--text-muted, var(--color-text-muted)); font-size: .9rem; margin: -.5rem 0 1.25rem; }
 .lpr-layout { display: grid; grid-template-columns: minmax(360px, .95fr) minmax(0, 1.05fr); gap: 1.25rem; align-items: start; }
+#view-lpr .lpr-input-panel,
+#view-lpr .source-preview-wrap { min-width: 0; }
+#lpr-video-output:not([hidden]) {
+  display: block;
+  width: 100%;
+  max-width: 640px;
+  max-height: 360px;
+  margin: 1rem auto 0;
+  object-fit: contain;
+  background: #111;
+  border-radius: var(--radius-md);
+}
 @media (max-width: 900px) { .lpr-layout { grid-template-columns: 1fr; } }
