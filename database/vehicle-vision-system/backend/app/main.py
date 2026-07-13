@@ -15,7 +15,7 @@ from app.models.user import User
 from app.database import SessionLocal
 from app.utils.auth import hash_password
 from app.utils.privacy import protect_email
-from app.routers import auth, lpr, police_gesture, owner_gesture, monitor, websocket
+from app.routers import auth, lpr, police_gesture, owner_gesture, monitor, websocket, scenario
 from app.services.alert_agent import alert_agent
 from app.services.llm_service import llm_service
 from app.services.lpr_service import lpr_service
@@ -123,6 +123,7 @@ app.include_router(lpr.router)
 app.include_router(police_gesture.router)
 app.include_router(owner_gesture.router)
 app.include_router(monitor.router)
+app.include_router(scenario.router)
 app.include_router(websocket.router)
 
 static_dir = Path(__file__).resolve().parent.parent / "static"

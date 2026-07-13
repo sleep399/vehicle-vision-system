@@ -64,6 +64,10 @@ class Settings(BaseSettings):
     alert_token_critical_threshold: int = 95000
     alert_token_limit: int = 100000
     alert_anomaly_rate_threshold: float = 0.3
+    scenario_window_seconds: int = 30
+    scenario_conflict_cooldown_seconds: int = 45
+    scenario_suppress_seconds: int = 60
+    scenario_advice_cache_seconds: int = 20
     alert_sse_enabled: bool = True
     alert_webhook_enabled: bool = False
     alert_email_enabled: bool = False
