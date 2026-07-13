@@ -14,10 +14,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fastapi.testclient import TestClient
 from fastapi import FastAPI
-from app.database import engine, init_db
-from app.models.user import User
+from app.database import SessionLocal, engine, init_db
+from app.models.user import User, VerificationCode
 from app.routers.auth import router as auth_router
 from app.services.auth_email import EmailDeliveryError, send_verification_email
+from app.utils.crypto import ENCRYPTED_PREFIX
 
 
 init_db()
@@ -47,6 +48,11 @@ class AuthenticationFlowTests(unittest.TestCase):
         self.assertEqual(sent.status_code, 200)
         self.assertNotIn("code", sent.json())
         registration_code = send_email.call_args.args[1]
+        with SessionLocal() as db:
+            stored_code = db.query(VerificationCode).order_by(VerificationCode.id.desc()).first()
+            self.assertNotEqual(stored_code.target, "password@example.com")
+            self.assertNotEqual(stored_code.code, registration_code)
+            self.assertTrue(stored_code.code_hash)
 
         registered = self.client.post(
             "/api/auth/register",
@@ -58,6 +64,13 @@ class AuthenticationFlowTests(unittest.TestCase):
             },
         )
         self.assertEqual(registered.status_code, 200)
+        with SessionLocal() as db:
+            stored_user = db.query(User).filter(User.username == "password_user").one()
+            self.assertNotEqual(stored_user.hashed_password, "safe-password-123")
+            self.assertTrue(stored_user.hashed_password.startswith("$2"))
+            self.assertNotEqual(stored_user.email, "password@example.com")
+            self.assertNotIn("password@example.com", stored_user.email_encrypted)
+            self.assertTrue(stored_user.email_encrypted.startswith(ENCRYPTED_PREFIX))
 
         logged_in = self.client.post(
             "/api/auth/login",
@@ -68,6 +81,7 @@ class AuthenticationFlowTests(unittest.TestCase):
         current_user = self.client.get("/api/auth/me", headers={"Authorization": f"Bearer {token}"})
         self.assertEqual(current_user.status_code, 200)
         self.assertEqual(current_user.json()["username"], "password_user")
+        self.assertEqual(current_user.json()["email"], "password@example.com")
 
     @patch("app.routers.auth.send_verification_email")
     def test_email_verification_code_login(self, send_email):

@@ -1,4 +1,5 @@
 import secrets
+import hmac
 import uuid
 from datetime import datetime, timedelta
 from io import BytesIO
@@ -12,23 +13,26 @@ from app.models.user import User, VerificationCode, WechatLoginSession
 from app.schemas import Token, UserCreate, UserLogin, CodeLoginRequest, SendCodeRequest
 from app.services.auth_email import EmailDeliveryError, send_verification_email
 from app.utils.auth import hash_password, verify_password, create_access_token, require_user
+from app.utils.crypto import hash_verification_code
 from app.utils.logger import write_log
+from app.utils.privacy import email_lookup, normalize_email, protect_email, user_email, user_phone
 
 router = APIRouter(prefix="/api/auth", tags=["认证"])
 
 
 @router.post("/register", response_model=Token, summary="账号密码注册")
 def register(data: UserCreate, db: Session = Depends(get_db)):
-    email = str(data.email).strip().lower()
+    email = normalize_email(str(data.email))
+    lookup = email_lookup(email)
     if db.query(User).filter(User.username == data.username).first():
         raise HTTPException(400, "用户名已存在")
-    if db.query(User).filter(User.email == email).first():
+    if db.query(User).filter(User.email_lookup == lookup).first():
         raise HTTPException(400, "该邮箱已注册")
     vc = _get_valid_code(db, email, "register", data.verification_code)
     user = User(
         username=data.username,
-        email=email,
         hashed_password=hash_password(data.password),
+        **protect_email(email),
     )
     vc.used = True
     db.add(user)
@@ -57,8 +61,9 @@ def login(data: UserLogin, db: Session = Depends(get_db)):
 
 @router.post("/send-code", summary="发送邮箱验证码")
 def send_code(data: SendCodeRequest, db: Session = Depends(get_db)):
-    email = str(data.email).strip().lower()
-    user = db.query(User).filter(User.email == email).first()
+    email = normalize_email(str(data.email))
+    lookup = email_lookup(email)
+    user = db.query(User).filter(User.email_lookup == lookup).first()
     if data.purpose == "login":
         if not user:
             raise HTTPException(404, "该邮箱尚未注册")
@@ -70,7 +75,7 @@ def send_code(data: SendCodeRequest, db: Session = Depends(get_db)):
     latest = (
         db.query(VerificationCode)
         .filter(
-            VerificationCode.target == email,
+            VerificationCode.target_lookup == lookup,
             VerificationCode.purpose == data.purpose,
             VerificationCode.used == False,
         )
@@ -88,27 +93,30 @@ def send_code(data: SendCodeRequest, db: Session = Depends(get_db)):
         raise HTTPException(503, str(exc)) from exc
 
     db.query(VerificationCode).filter(
-        VerificationCode.target == email,
+        VerificationCode.target_lookup == lookup,
         VerificationCode.purpose == data.purpose,
         VerificationCode.used == False,
     ).update({VerificationCode.used: True}, synchronize_session=False)
     vc = VerificationCode(
-        target=email,
-        code=code,
+        target=lookup,
+        code="hashed",
+        target_lookup=lookup,
+        code_hash=hash_verification_code(email, data.purpose, code),
         purpose=data.purpose,
         expires_at=now + timedelta(minutes=5),
     )
     db.add(vc)
     db.commit()
-    write_log(db, "user", f"{data.purpose} 验证码已发送", detail={"email": email})
+    write_log(db, "user", f"{data.purpose} 验证码已发送")
     return {"message": "验证码已发送，请查收邮件", "expires_in": 300}
 
 
 def _get_valid_code(db: Session, email: str, purpose: str, code: str) -> VerificationCode:
+    lookup = email_lookup(email)
     vc = (
         db.query(VerificationCode)
         .filter(
-            VerificationCode.target == email,
+            VerificationCode.target_lookup == lookup,
             VerificationCode.purpose == purpose,
             VerificationCode.used == False,
             VerificationCode.expires_at > datetime.utcnow(),
@@ -116,15 +124,16 @@ def _get_valid_code(db: Session, email: str, purpose: str, code: str) -> Verific
         .order_by(VerificationCode.id.desc())
         .first()
     )
-    if not vc or not secrets.compare_digest(vc.code, code):
+    expected_hash = hash_verification_code(email, purpose, code)
+    if not vc or not vc.code_hash or not hmac.compare_digest(vc.code_hash, expected_hash):
         raise HTTPException(400, "验证码无效或已过期")
     return vc
 
 
 @router.post("/login-code", response_model=Token, summary="验证码登录")
 def login_with_code(data: CodeLoginRequest, db: Session = Depends(get_db)):
-    email = str(data.email).strip().lower()
-    user = db.query(User).filter(User.email == email).first()
+    email = normalize_email(str(data.email))
+    user = db.query(User).filter(User.email_lookup == email_lookup(email)).first()
     if not user:
         raise HTTPException(404, "该邮箱尚未注册")
     if not user.is_active:
@@ -132,7 +141,7 @@ def login_with_code(data: CodeLoginRequest, db: Session = Depends(get_db)):
     vc = _get_valid_code(db, email, "login", data.code)
     vc.used = True
     db.commit()
-    write_log(db, "user", f"验证码登录: {email}", user_id=user.id)
+    write_log(db, "user", "验证码登录成功", user_id=user.id)
     return Token(access_token=create_access_token({"sub": user.username}))
 
 
@@ -179,7 +188,7 @@ def wechat_confirm(session_id: str, db: Session = Depends(get_db)):
         return {"status": "confirmed"}
     user = db.query(User).filter(User.username == "wechat_demo_user").first()
     if not user:
-        user = User(username="wechat_demo_user", email="wechat-demo@local")
+        user = User(username="wechat_demo_user", **protect_email("wechat-demo@local"))
         db.add(user)
         db.flush()
     session.status = "confirmed"
@@ -215,4 +224,9 @@ def logout(request: Request, user: User = Depends(require_user), db: Session = D
 
 @router.get("/me", summary="当前用户信息")
 def me(user: User = Depends(require_user)):
-    return {"id": user.id, "username": user.username, "email": user.email, "phone": user.phone}
+    return {
+        "id": user.id,
+        "username": user.username,
+        "email": user_email(user),
+        "phone": user_phone(user),
+    }

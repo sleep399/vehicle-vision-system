@@ -8,3 +8,4 @@ backend/app/models/*.task
 .venv/
 venv/
 *.log
+certs/

@@ -22,6 +22,10 @@ CREATE TABLE dbo.Users (
     Username NVARCHAR(64) NOT NULL,
     Email NVARCHAR(128) NULL,
     Phone NVARCHAR(20) NULL,
+    email_encrypted NVARCHAR(512) NULL,
+    email_lookup NVARCHAR(64) NULL,
+    phone_encrypted NVARCHAR(256) NULL,
+    phone_lookup NVARCHAR(64) NULL,
     HashedPassword NVARCHAR(256) NULL,
     IsActive BIT NOT NULL CONSTRAINT DF_Users_IsActive DEFAULT(1),
     CreatedAt DATETIME2 NOT NULL CONSTRAINT DF_Users_CreatedAt DEFAULT(SYSDATETIME()),
@@ -35,6 +39,8 @@ CREATE TABLE dbo.VerificationCodes (
     Id INT IDENTITY(1,1) NOT NULL PRIMARY KEY,
     Target NVARCHAR(128) NOT NULL,
     Code NVARCHAR(8) NOT NULL,
+    target_lookup NVARCHAR(64) NULL,
+    code_hash NVARCHAR(64) NULL,
     Purpose NVARCHAR(32) NOT NULL CONSTRAINT DF_VerificationCodes_Purpose DEFAULT('login'),
     ExpiresAt DATETIME2 NOT NULL,
     Used BIT NOT NULL CONSTRAINT DF_VerificationCodes_Used DEFAULT(0)
@@ -139,7 +145,7 @@ GO
 
 INSERT INTO dbo.Users (Username, Email, Phone, HashedPassword, IsActive)
 VALUES
-(N'admin', N'admin@example.com', N'13800000000', N'admin123', 1);
+(N'admin', NULL, NULL, N'$2b$12$GUzAFCe47hUIvSfY7B3pC.h4IUD5etnsIwSJ4O34iUTPD1qrzf.hi', 1);
 GO
 
 USE VehicleVisionDB;
@@ -223,6 +229,6 @@ IF NOT EXISTS (SELECT 1 FROM dbo.Users WHERE username = 'admin')
 BEGIN
     INSERT INTO dbo.Users (username, email, phone, hashed_password, is_active, created_at)
     VALUES
-    (N'admin', N'admin@example.com', N'13800000000', N'admin123', 1, SYSDATETIME());
+    (N'admin', NULL, NULL, N'$2b$12$GUzAFCe47hUIvSfY7B3pC.h4IUD5etnsIwSJ4O34iUTPD1qrzf.hi', 1, SYSDATETIME());
 END
 GO

@@ -48,7 +48,10 @@ class Settings(BaseSettings):
     yolo_lprnet_path: str = "./yolo_lprnet_assets"
     ctpgr_data_path: str = "../ctpgr-pytorch-master"
     hagrid_data_path: str = "../hagrid-master"
-    aes_key: str = "0123456789abcdef0123456789abcdef"
+    # 由 setup_security.py 为每台开发机单独生成，不提供可用于生产的默认值。
+    aes_key: str = ""
+    https_certfile: str = "certs/localhost-cert.pem"
+    https_keyfile: str = "certs/localhost-key.pem"
     access_token_expire_minutes: int = 60 * 24
     gesture_hold_threshold: float = 0.8
     alert_failure_threshold: int = 5

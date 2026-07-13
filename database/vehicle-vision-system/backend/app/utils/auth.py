@@ -1,7 +1,6 @@
 from datetime import datetime, timedelta
 from typing import Optional
 import bcrypt
-import hmac
 from jose import jwt, JWTError
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
@@ -24,9 +23,7 @@ def verify_password(plain: str, hashed: str) -> bool:
     try:
         return bcrypt.checkpw(plain.encode("utf-8"), hashed.encode("utf-8"))
     except (ValueError, TypeError):
-        # Kept only to allow a locally seeded legacy demo account to log in
-        # once after upgrading; newly registered passwords are always bcrypt.
-        return hmac.compare_digest(plain, hashed)
+        return False
 
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:

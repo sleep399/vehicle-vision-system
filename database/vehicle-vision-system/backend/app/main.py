@@ -14,6 +14,7 @@ from app.database import init_db, check_db_connection
 from app.models.user import User
 from app.database import SessionLocal
 from app.utils.auth import hash_password
+from app.utils.privacy import protect_email
 from app.routers import auth, lpr, police_gesture, owner_gesture, monitor, websocket
 from app.services.alert_agent import alert_agent
 from app.services.llm_service import llm_service
@@ -86,9 +87,9 @@ async def lifespan(app: FastAPI):
             db.execute(
                 User.__table__.insert().values(
                     username="admin",
-                    email="admin@demo.com",
                     hashed_password=hash_password("admin123"),
                     is_active=True,
+                    **protect_email("admin@demo.com"),
                 )
             )
             db.commit()

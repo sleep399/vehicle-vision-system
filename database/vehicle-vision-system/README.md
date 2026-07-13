@@ -17,15 +17,18 @@
 ```bash
 cd vehicle-vision-system
 pip install -r requirements.txt
+python setup_security.py
 python run.py
 ```
 
 或双击 `start.bat`（Windows）。
 
-访问 http://localhost:8001
+每台电脑、每份项目目录首次运行一次 `python setup_security.py` 即可；重复运行会保留已有密钥和证书。
+
+访问 https://localhost:8001（本地自签名证书首次访问可能出现浏览器安全提示）
 
 - 默认账号：`admin` / `admin123`
-- API 文档：http://localhost:8001/api/docs
+- API 文档：https://localhost:8001/api/docs
 
 ## 项目结构
 

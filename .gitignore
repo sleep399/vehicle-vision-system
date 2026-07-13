@@ -20,6 +20,7 @@ database/vehicle-vision-system/**/__pycache__/
 database/vehicle-vision-system/**/*.py[cod]
 database/vehicle-vision-system/*.log
 database/vehicle-vision-system/**/*.log
+database/vehicle-vision-system/certs/
 database/vehicle-vision-system/*.db
 database/vehicle-vision-system/**/*.db
 database/vehicle-vision-system/.venv/
