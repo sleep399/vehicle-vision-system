@@ -35,6 +35,25 @@ const App = {
     else document.getElementById('login-page').classList.add('active');
   },
 
+  BACKEND_PORT: 8001,
+
+  backendOrigin() {
+    const host = location.hostname || 'localhost';
+    const proto = location.protocol === 'https:' ? 'https' : 'http';
+    return `${proto}://${host}:${this.BACKEND_PORT}`;
+  },
+
+  apiUrl(path) {
+    if (!path || /^https?:\/\//i.test(path)) return path;
+    return `${this.backendOrigin()}${path.startsWith('/') ? path : `/${path}`}`;
+  },
+
+  wsBase() {
+    const host = location.hostname || 'localhost';
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    return `${proto}://${host}:${this.BACKEND_PORT}`;
+  },
+
   headers() {
     const h = { 'Content-Type': 'application/json' };
     if (this.token) h['Authorization'] = `Bearer ${this.token}`;
@@ -42,7 +61,7 @@ const App = {
   },
 
   async api(path, opts = {}) {
-    const res = await fetch(path, { ...opts, headers: { ...this.headers(), ...opts.headers } });
+    const res = await fetch(this.apiUrl(path), { ...opts, headers: { ...this.headers(), ...opts.headers } });
     if (!res.ok) {
       const err = await res.json().catch(() => ({ detail: res.statusText }));
       throw new Error(err.detail || '请求失败');
@@ -149,7 +168,6 @@ const App = {
 
   lprEngineLabel(data) {
     const src = data?.source || data?.plates?.[0]?.source;
-    if (src === 'yolo_lprnet') return 'runtime_api / yolo_lprnet_assets';
     if (src === 'ccpd_gt') return 'backend / CCPD';
     if (src === 'model') return 'backend / RPNet';
     return 'backend';
@@ -171,7 +189,7 @@ const App = {
       const vel = document.getElementById('lpr-video-model-status');
       if (vel) {
         vel.textContent = vidSt.model_available
-          ? '视频识别：YOLO+LPRNet 已就绪（支持多车牌）'
+          ? '视频识别：RPNet 已就绪'
           : `视频识别：${vidSt.message || '模型未加载'}`;
         vel.className = vidSt.model_available ? 'section-desc model-ok' : 'section-desc model-warn';
       }
@@ -196,6 +214,7 @@ const App = {
       if (this.connectSSE) this.connectSSE();
       this.loadAlerts();
       this.loadAlertTypes();
+      if (this.loadScenarioFusion) this.loadScenarioFusion();
       if (this.loadAlertAnalytics) this.loadAlertAnalytics();
       if (this.loadAgentActivity) this.loadAgentActivity();
       if (this.loadAlertNotifications) this.loadAlertNotifications();
@@ -210,12 +229,8 @@ const App = {
   },
 
   async login() {
-    const username = document.getElementById('login-user').value.trim();
+    const username = document.getElementById('login-user').value;
     const password = document.getElementById('login-pass').value;
-    if (!username || !password) {
-      alert('请输入用户名和密码');
-      return;
-    }
     try {
       const data = await this.api('/api/auth/login', {
         method: 'POST',
@@ -230,25 +245,16 @@ const App = {
   async register() {
     const username = document.getElementById('register-user').value.trim();
     const password = document.getElementById('register-pass').value;
-    const passwordConfirm = document.getElementById('register-pass-confirm').value;
-    const email = document.getElementById('register-email').value.trim();
-    const verificationCode = document.getElementById('register-code').value.trim();
-    if (!username || !password || !email || !verificationCode) {
-      alert('请完整填写注册信息');
-      return;
-    }
-    if (password.length < 8) {
-      alert('密码至少需要 8 位');
-      return;
-    }
-    if (password !== passwordConfirm) {
-      alert('两次输入的密码不一致');
+    const email = document.getElementById('register-email').value.trim() || null;
+    const phone = document.getElementById('register-phone').value.trim() || null;
+    if (!username || !password) {
+      alert('请输入用户名和密码');
       return;
     }
     try {
       const data = await this.api('/api/auth/register', {
         method: 'POST',
-        body: JSON.stringify({ username, password, email, verification_code: verificationCode }),
+        body: JSON.stringify({ username, password, email, phone }),
       });
       this.token = data.access_token;
       localStorage.setItem('token', this.token);
@@ -303,57 +309,46 @@ const App = {
     document.body.style.overflow = '';
   },
 
-  async sendCode(purpose) {
-    const isRegister = purpose === 'register';
-    const email = document.getElementById(isRegister ? 'register-email' : 'code-email').value.trim();
-    const button = document.getElementById(isRegister ? 'register-code-button' : 'login-code-button');
-    if (!email) {
-      alert('请输入邮箱');
-      return;
-    }
+  async sendCode() {
+    const target = document.getElementById('code-target').value;
     try {
       const data = await this.api('/api/auth/send-code', {
         method: 'POST',
-        body: JSON.stringify({ email, purpose }),
+        body: JSON.stringify({ target, target_type: target.includes('@') ? 'email' : 'phone' }),
       });
-      alert(data.message);
-      this.startCodeCountdown(button);
+      alert('验证码: ' + data.code + ' (演示模式直接显示)');
     } catch (e) { alert(e.message); }
   },
 
-  startCodeCountdown(button, seconds = 60) {
-    if (!button) return;
-    const originalText = button.textContent;
-    button.disabled = true;
-    let remaining = seconds;
-    button.textContent = `${remaining} 秒后重试`;
-    const timer = setInterval(() => {
-      remaining -= 1;
-      if (remaining <= 0) {
-        clearInterval(timer);
-        button.disabled = false;
-        button.textContent = originalText;
-        return;
-      }
-      button.textContent = `${remaining} 秒后重试`;
-    }, 1000);
-  },
-
   async loginCode() {
-    const email = document.getElementById('code-email').value.trim();
-    const code = document.getElementById('code-input').value.trim();
-    if (!email || !code) {
-      alert('请输入注册邮箱和验证码');
-      return;
-    }
+    const target = document.getElementById('code-target').value;
+    const code = document.getElementById('code-input').value;
     try {
       const data = await this.api('/api/auth/login-code', {
         method: 'POST',
-        body: JSON.stringify({ email, code }),
+        body: JSON.stringify({ target, code, target_type: target.includes('@') ? 'email' : 'phone' }),
       });
       this.token = data.access_token;
       localStorage.setItem('token', this.token);
       this.showMain();
+    } catch (e) { alert(e.message); }
+  },
+
+  async wechatLogin() {
+    try {
+      const session = await this.api('/api/auth/wechat/qrcode', { method: 'POST' });
+      const qrBox = document.getElementById('qr-box');
+      qrBox.innerHTML = `<img src="${session.qrcode_url}" alt="微信扫码登录二维码"><small>请用手机扫描后确认（演示模式）</small>`;
+      const poll = setInterval(async () => {
+        const res = await fetch(this.apiUrl(session.poll_url));
+        const data = await res.json();
+        if (data.status === 'confirmed') {
+          clearInterval(poll);
+          this.token = data.access_token;
+          localStorage.setItem('token', this.token);
+          this.showMain();
+        }
+      }, 1500);
     } catch (e) { alert(e.message); }
   },
 
@@ -385,8 +380,7 @@ const App = {
 
   connectAlertWs() {
     if (this.wsAlerts) return;
-    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    this.wsAlerts = new WebSocket(`${proto}://${location.host}/ws/alerts`);
+    this.wsAlerts = new WebSocket(`${this.wsBase()}/ws/alerts`);
     this.wsAlerts.onmessage = (e) => {
       const data = JSON.parse(e.data);
       if (data.type === 'alert') this.showToast(data);
@@ -518,7 +512,7 @@ const App = {
         const url = module === 'lpr'
           ? `${endpoints[module]}?mode=${options.forceModel ? 'lprnet' : 'ccpd'}`
           : endpoints[module];
-        const res = await fetch(url, { method: 'POST', body: form, headers });
+        const res = await fetch(this.apiUrl(url), { method: 'POST', body: form, headers });
         data = await res.json();
         if (!res.ok) throw new Error(data.detail || '识别失败');
       }
@@ -669,8 +663,7 @@ const App = {
     this.streamBusy = false;
     this.uploadedRecognitionResults = [];
     const ctx = canvas.getContext('2d');
-    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    this.wsStream = new WebSocket(`${proto}://${location.host}/ws/stream/police`);
+    this.wsStream = new WebSocket(`${this.wsBase()}/ws/stream/police`);
     const sampleFps = 15;
     const sampleMs = 1000 / sampleFps;
     let processedFrames = 0;
@@ -797,7 +790,7 @@ const App = {
       const plateSummary = (data.plates || []).map(p => p.plate_number).filter(Boolean).join('、') || '';
       const failMsg = isVideo
         ? (data.model_available === false
-          ? 'YOLO+LPRNet 未加载，请将权重放到 vehicle-vision-system/yolo_lprnet_assets/weights/ 或 backend/weights/'
+          ? 'RPNet 未加载，请将 fh02.pth 放到 backend/app/models/'
           : '当前帧未检测到有效车牌')
         : (data.model_available === false
           ? 'RPNet 模型未加载，请将 fh02.pth 放到 backend/app/models/'
@@ -947,7 +940,7 @@ const App = {
     try {
       const headers = { 'Content-Type': 'application/json' };
       if (this.token) headers['Authorization'] = `Bearer ${this.token}`;
-      const res = await fetch(`/api/lpr/recognize-ccpd?relative=${encodeURIComponent(relative)}`, {
+      const res = await fetch(this.apiUrl(`/api/lpr/recognize-ccpd?relative=${encodeURIComponent(relative)}`), {
         method: 'POST', headers,
       });
       const data = await res.json();
@@ -1347,10 +1340,9 @@ const App = {
       const statusEl = document.getElementById('lpr-video-model-status');
       if (statusEl) statusEl.textContent = '摄像头已打开，等待识别结果…';
 
-      const proto = location.protocol === 'https:' ? 'wss' : 'ws';
       const wsUrl = module === 'owner'
-        ? `${proto}://${location.host}/api/owner-gesture/ws-stream?token=${encodeURIComponent(this.token || '')}`
-        : `${proto}://${location.host}/ws/stream/${module}`;
+        ? `${this.wsBase()}/api/owner-gesture/ws-stream?token=${encodeURIComponent(this.token || '')}`
+        : `${this.wsBase()}/ws/stream/${module}`;
       this.wsStream = new WebSocket(wsUrl);
       this.wsStream.onopen = () => {
         if (resultBox) resultBox.innerHTML = '摄像头和识别服务已连接，等待手势…';
@@ -1425,8 +1417,7 @@ const App = {
       streamPreview.removeAttribute('src');
     }
 
-    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    this.wsStream = new WebSocket(`${proto}://${location.host}/ws/stream-url/${module}`);
+    this.wsStream = new WebSocket(`${this.wsBase()}/ws/stream-url/${module}`);
     this.wsStream.onopen = () => {
       this.wsStream.send(JSON.stringify({ type: 'start', url, interval: 1, target_fps: 15 }));
     };
@@ -1561,7 +1552,7 @@ const App = {
       const payload = localFile
         ? { rtsp_url: rtspUrl, source_name: source.split('/').pop() || 'live1', label: presetLabel || null }
         : { rtsp_url: rtspUrl, source_name: source.split('/').pop() || 'live1', label: presetLabel || null };
-      const res = await fetch('/api/lpr/rtsp/start', {
+      const res = await fetch(this.apiUrl('/api/lpr/rtsp/start'), {
         method: 'POST',
         headers,
         body: JSON.stringify(payload),
@@ -1662,8 +1653,7 @@ const App = {
 
     try {
       debug('connecting websocket');
-      const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-      this.lprVideoWs = new WebSocket(`${proto}://${location.host}/ws/stream/lpr`);
+      this.lprVideoWs = new WebSocket(`${this.wsBase()}/ws/stream/lpr`);
       this.lprVideoWs.onopen = async () => {
         debug('websocket open');
           if (progressText) progressText.textContent = '识别连接已建立，正在尝试播放视频…';
@@ -1703,28 +1693,20 @@ const App = {
           this.lprVideoBusy = false;
           const data = msg.data || {};
           frameCount += 1;
-          const rawPlates = Array.isArray(data.plates) ? data.plates : [];
-          const validPlates = rawPlates.filter((p) => {
-            const plate = (p.plate_number || p.text || '').replace(/无法识别/g, '').trim();
-            const hitCount = Number(p.hit_count || 0);
-            const maxConfidence = Number(p.max_confidence || p.confidence || 0);
-            return plate.length >= 4 && (hitCount >= 2 || maxConfidence >= 0.55);
-          });
-          const validCount = validPlates.length;
-          debug('frame result', data.frame, data.plate_count, data.plates, 'valid=', validCount);
+          debug('frame result', data.frame, data.plate_count, data.plates);
           if (data.annotated_image && preview) preview.src = 'data:image/jpeg;base64,' + data.annotated_image;
-          const title = validCount ? `✓ 检测到 ${validCount} 个车牌` : '○ 未检测到车牌';
-          const subtitle = validPlates.map(p => (p.plate_number || p.text || '').trim()).filter(Boolean).join('、') || '等待下一帧';
+          const title = data.plate_count ? `✓ 检测到 ${data.plate_count} 个车牌` : '○ 未检测到车牌';
+          const subtitle = data.plates?.map(p => p.plate_number).filter(Boolean).join('、') || '等待下一帧';
           if (videoResult) {
-            videoResult.innerHTML = `<div class="result-banner ${validCount ? 'success' : 'danger'}"><div class="result-title">${title}</div><div class="result-subtitle">${subtitle}</div><div class="result-subtitle">runtime_api / yolo_lprnet_assets · 帧 ${data.frame ?? frameCount}</div></div>`;
+            videoResult.innerHTML = `<div class="result-banner ${data.plate_count ? 'success' : 'danger'}"><div class="result-title">${title}</div><div class="result-subtitle">${subtitle}</div><div class="result-subtitle">backend / RPNet · 帧 ${data.frame ?? frameCount}</div></div>`;
           }
           if (plateTarget) {
-            plateTarget.innerHTML = validPlates.map(p => `<div class="plate-item"><span class="number">${this.formatPlateNumber(p.plate_number || p.text)}</span><span class="color ${this.plateColorClass(p.plate_color)}">${p.plate_color || '蓝牌'}</span><span class="history-meta" style="margin-left:.5rem">${((p.confidence || 0) * 100).toFixed(0)}%</span></div>`).join('') || '<p style="color:var(--text-muted)">未检测到车牌</p>';
+            plateTarget.innerHTML = (data.plates || []).map(p => `<div class="plate-item"><span class="number">${this.formatPlateNumber(p.plate_number)}</span><span class="color ${this.plateColorClass(p.plate_color)}">${p.plate_color || '蓝牌'}</span><span class="history-meta" style="margin-left:.5rem">${((p.confidence || 0) * 100).toFixed(0)}%</span></div>`).join('') || '<p style="color:var(--text-muted)">未检测到车牌</p>';
           }
           if (progressFill) progressFill.style.width = Math.min(100, 5 + sentCount * 2) + '%';
           if (progressText) progressText.textContent = `实时识别中 · 已处理 ${frameCount} 帧`;
-          validPlates.forEach(p => {
-            const plate = (p.plate_number || p.text || '').trim();
+          (data.plates || []).forEach(p => {
+            const plate = (p.plate_number || '').trim();
             const conf = Number(p.confidence || 0);
             if (!plate || conf < 0.65) return;
             const key = `${plate}|${p.plate_color || '蓝牌'}`;
@@ -1735,7 +1717,7 @@ const App = {
               plate_color: p.plate_color || '蓝牌',
               confidence: conf,
               frame_index: data.frame ?? frameCount,
-              source: 'yolo_lprnet',
+              source: 'model',
             });
             console.log('[LPR-VIDEO] accumulate plate', plate, conf.toFixed(3), 'frame=', data.frame ?? frameCount);
           });
@@ -1780,7 +1762,7 @@ const App = {
           try {
             const headers = { 'Content-Type': 'application/json' };
             if (this.token) headers['Authorization'] = `Bearer ${this.token}`;
-            const resp = await fetch('/api/lpr/video-history', {
+            const resp = await fetch(this.apiUrl('/api/lpr/video-history'), {
               method: 'POST',
               headers,
               body: JSON.stringify({
@@ -1857,7 +1839,7 @@ const App = {
     try {
       const headers = { 'Content-Type': 'application/json' };
       if (this.token) headers['Authorization'] = `Bearer ${this.token}`;
-      await fetch('/api/lpr/rtsp/stop', {
+      await fetch(this.apiUrl('/api/lpr/rtsp/stop'), {
         method: 'POST',
         headers,
         body: JSON.stringify({ source_name: sourceName }),
@@ -1953,7 +1935,7 @@ const App = {
 
   connectAlertSse() {
     if (this.alertSse) return;
-    this.alertSse = new EventSource('/api/monitor/stream');
+    this.alertSse = new EventSource(this.apiUrl('/api/monitor/stream'));
     this.alertSse.onmessage = event => {
       const data = JSON.parse(event.data || '{}');
       if (data.type === 'alert') { this.showToast(data); this.loadAlerts(); }
@@ -2110,7 +2092,7 @@ const App = {
       if (status) status.textContent = '未连接';
       return;
     }
-    this.logSse = new EventSource('/api/monitor/logs/stream');
+    this.logSse = new EventSource(this.apiUrl('/api/monitor/logs/stream'));
     this.logSse.onopen = () => { const status = document.getElementById('log-stream-status'); if (status) status.textContent = '已连接'; };
     this.logSse.onmessage = () => { this.loadLogs(); this.loadLogStats(); };
     this.logSse.onerror = () => { this.logSse?.close(); this.logSse = null; if (button) button.textContent = '开启实时日志'; const status = document.getElementById('log-stream-status'); if (status) status.textContent = '连接中断'; };
