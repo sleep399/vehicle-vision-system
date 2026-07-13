@@ -1,18 +1,18 @@
 /* 日志告警完整工作台：沿用当前主题，仅补充组员版组件。 */
 :root {
-  --color-bg-primary: var(--bg);
-  --color-bg-secondary: var(--surface2);
-  --color-bg-base: var(--surface2);
-  --color-bg-raised: var(--surface);
-  --color-surface: var(--surface);
-  --color-surface-hover: var(--surface2);
-  --color-border: var(--border);
-  --color-border-light: var(--border);
-  --color-border-default: var(--border);
-  --color-border-subtle: var(--border);
-  --color-text-primary: var(--text);
-  --color-text-secondary: var(--text-muted);
-  --color-text-muted: var(--text-muted);
+  --color-bg-primary: #ECE9E0;
+  --color-bg-secondary: #F5F3EC;
+  --color-bg-base: #ECE9E0;
+  --color-bg-raised: #F5F3EC;
+  --color-surface: #F5F3EC;
+  --color-surface-hover: #FDFCF8;
+  --color-border: #D8D5CC;
+  --color-border-light: #E8E6DC;
+  --color-border-default: #D8D5CC;
+  --color-border-subtle: #E8E6DC;
+  --color-text-primary: #141413;
+  --color-text-secondary: #6B6860;
+  --color-text-muted: #B0AEA5;
   --color-accent-orange: #d97757;
   --color-accent-dim: rgba(217,119,87,.16);
   --color-error: #c0453a;
