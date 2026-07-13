@@ -66,15 +66,21 @@ vehicle-vision-system/
 LLM_PROVIDER=openai       # openai/qwen/deepseek/zhipu/custom
 LLM_API_KEY=sk-xxx          # OpenAI 兼容 API Key（留空使用模板告警）
 WEBHOOK_URL=https://...       # 企业微信/钉钉机器人 Webhook
-SMTP_HOST=smtp.example.com    # 邮件通知
+SMTP_HOST=smtp.example.com    # 登录/注册验证码邮件
+SMTP_PORT=587
+SMTP_USER=sender@example.com
+SMTP_PASSWORD=邮箱授权码
+SMTP_USE_TLS=true
 ```
 
 ## 登录方式
 
-1. **账号密码** — admin / admin123
-2. **验证码登录** — 邮箱/手机号 + 验证码（演示模式返回验证码）
-3. **微信扫码** — 模拟扫码（3 秒后自动确认）
-4. **跳过登录** — 直接体验（部分功能可用）
+1. **密码登录** — 使用用户名和密码登录
+2. **验证码登录** — 验证码发送到注册邮箱，验证成功后登录
+3. **注册账号** — 注册邮箱通过验证码校验后创建账号并登录
+4. **游客模式** — 不注册直接体验（部分功能可用）
+
+验证码有效期为 5 分钟，同一邮箱 60 秒内不能重复发送。`SMTP_PORT=465` 时系统自动使用 SMTP SSL；其它端口根据 `SMTP_USE_TLS` 决定是否启用 STARTTLS。
 
 ## API 概览
 

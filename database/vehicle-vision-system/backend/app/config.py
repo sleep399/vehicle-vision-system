@@ -40,6 +40,8 @@ class Settings(BaseSettings):
     smtp_port: int = 587
     smtp_user: str = ""
     smtp_password: str = ""
+    smtp_use_tls: bool = True
+    smtp_timeout: float = 10.0
     alert_email_to: str = ""
     webhook_url: str = ""
     ccpd_data_path: str = "../CCPD-master"

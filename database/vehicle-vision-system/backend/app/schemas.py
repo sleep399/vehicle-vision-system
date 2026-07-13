@@ -1,5 +1,6 @@
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field
 from typing import Optional
+from typing import Literal
 from datetime import datetime
 
 
@@ -9,10 +10,10 @@ class Token(BaseModel):
 
 
 class UserCreate(BaseModel):
-    username: str
-    password: str
-    email: Optional[EmailStr] = None
-    phone: Optional[str] = None
+    username: str = Field(min_length=2, max_length=64)
+    password: str = Field(min_length=8, max_length=128)
+    email: EmailStr
+    verification_code: str = Field(pattern=r"^\d{6}$")
 
 
 class UserLogin(BaseModel):
@@ -21,14 +22,13 @@ class UserLogin(BaseModel):
 
 
 class CodeLoginRequest(BaseModel):
-    target: str
-    code: str
-    target_type: str = "email"
+    email: EmailStr
+    code: str = Field(pattern=r"^\d{6}$")
 
 
 class SendCodeRequest(BaseModel):
-    target: str
-    target_type: str = "email"
+    email: EmailStr
+    purpose: Literal["login", "register"]
 
 
 class PlateResult(BaseModel):

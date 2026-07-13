@@ -1,4 +1,4 @@
-import random
+import secrets
 import uuid
 from datetime import datetime, timedelta
 from io import BytesIO
@@ -9,23 +9,27 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.user import User, VerificationCode, WechatLoginSession
 from app.schemas import Token, UserCreate, UserLogin, CodeLoginRequest, SendCodeRequest
-from app.utils.auth import hash_password, verify_password, create_access_token, get_current_user, require_user
+from app.services.auth_email import EmailDeliveryError, send_verification_email
+from app.utils.auth import hash_password, verify_password, create_access_token, require_user
 from app.utils.logger import write_log
-from app.services.alert_agent import alert_agent
 
 router = APIRouter(prefix="/api/auth", tags=["认证"])
 
 
 @router.post("/register", response_model=Token, summary="账号密码注册")
 def register(data: UserCreate, db: Session = Depends(get_db)):
+    email = str(data.email).strip().lower()
     if db.query(User).filter(User.username == data.username).first():
         raise HTTPException(400, "用户名已存在")
+    if db.query(User).filter(User.email == email).first():
+        raise HTTPException(400, "该邮箱已注册")
+    vc = _get_valid_code(db, email, "register", data.verification_code)
     user = User(
         username=data.username,
-        email=data.email,
-        phone=data.phone,
+        email=email,
         hashed_password=hash_password(data.password),
     )
+    vc.used = True
     db.add(user)
     db.commit()
     write_log(db, "user", f"用户注册: {data.username}")
@@ -46,48 +50,84 @@ def login(data: UserLogin, db: Session = Depends(get_db)):
     return Token(access_token=create_access_token({"sub": user.username}))
 
 
-@router.post("/send-code", summary="发送邮箱/手机验证码")
+@router.post("/send-code", summary="发送邮箱验证码")
 def send_code(data: SendCodeRequest, db: Session = Depends(get_db)):
-    if data.target_type not in {"email", "phone"} or not data.target.strip():
-        raise HTTPException(400, "请提供有效的邮箱或手机号")
-    code = f"{random.randint(100000, 999999)}"
+    email = str(data.email).strip().lower()
+    user = db.query(User).filter(User.email == email).first()
+    if data.purpose == "login":
+        if not user:
+            raise HTTPException(404, "该邮箱尚未注册")
+        if not user.is_active:
+            raise HTTPException(403, "用户已被禁用")
+    elif user:
+        raise HTTPException(400, "该邮箱已注册")
+
+    latest = (
+        db.query(VerificationCode)
+        .filter(
+            VerificationCode.target == email,
+            VerificationCode.purpose == data.purpose,
+            VerificationCode.used == False,
+        )
+        .order_by(VerificationCode.id.desc())
+        .first()
+    )
+    now = datetime.utcnow()
+    if latest and latest.expires_at > now + timedelta(minutes=4):
+        raise HTTPException(429, "验证码发送过于频繁，请稍后再试")
+
+    code = f"{secrets.randbelow(900000) + 100000}"
+    try:
+        send_verification_email(email, code, data.purpose)
+    except EmailDeliveryError as exc:
+        raise HTTPException(503, str(exc)) from exc
+
+    db.query(VerificationCode).filter(
+        VerificationCode.target == email,
+        VerificationCode.purpose == data.purpose,
+        VerificationCode.used == False,
+    ).update({VerificationCode.used: True}, synchronize_session=False)
     vc = VerificationCode(
-        target=data.target,
+        target=email,
         code=code,
-        purpose="login",
-        expires_at=datetime.utcnow() + timedelta(minutes=5),
+        purpose=data.purpose,
+        expires_at=now + timedelta(minutes=5),
     )
     db.add(vc)
     db.commit()
-    write_log(db, "user", f"验证码已发送至 {data.target}", detail={"code": code, "type": data.target_type})
-    # This project has no SMTP/SMS provider configuration. Returning the code
-    # keeps the flow testable in demo mode and must be removed in production.
-    return {"message": "验证码已发送（演示模式）", "code": code, "expires_in": 300}
+    write_log(db, "user", f"{data.purpose} 验证码已发送", detail={"email": email})
+    return {"message": "验证码已发送，请查收邮件", "expires_in": 300}
+
+
+def _get_valid_code(db: Session, email: str, purpose: str, code: str) -> VerificationCode:
+    vc = (
+        db.query(VerificationCode)
+        .filter(
+            VerificationCode.target == email,
+            VerificationCode.purpose == purpose,
+            VerificationCode.used == False,
+            VerificationCode.expires_at > datetime.utcnow(),
+        )
+        .order_by(VerificationCode.id.desc())
+        .first()
+    )
+    if not vc or not secrets.compare_digest(vc.code, code):
+        raise HTTPException(400, "验证码无效或已过期")
+    return vc
 
 
 @router.post("/login-code", response_model=Token, summary="验证码登录")
 def login_with_code(data: CodeLoginRequest, db: Session = Depends(get_db)):
-    vc = (
-        db.query(VerificationCode)
-        .filter(VerificationCode.target == data.target, VerificationCode.used == False, VerificationCode.expires_at > datetime.utcnow())
-        .order_by(VerificationCode.id.desc())
-        .first()
-    )
-    if not vc or vc.code != data.code:
-        raise HTTPException(400, "验证码无效或已过期")
-    vc.used = True
-    field = User.email if data.target_type == "email" else User.phone
-    user = db.query(User).filter(field == data.target).first()
+    email = str(data.email).strip().lower()
+    user = db.query(User).filter(User.email == email).first()
     if not user:
-        username = data.target.split("@")[0] if "@" in data.target else data.target
-        user = User(username=username, email=data.target if data.target_type == "email" else None, phone=data.target if data.target_type == "phone" else None)
-        db.add(user)
-        db.commit()
-        db.refresh(user)
-    elif not user.is_active:
+        raise HTTPException(404, "该邮箱尚未注册")
+    if not user.is_active:
         raise HTTPException(403, "用户已被禁用")
+    vc = _get_valid_code(db, email, "login", data.code)
+    vc.used = True
     db.commit()
-    write_log(db, "user", f"验证码登录: {data.target}", user_id=user.id)
+    write_log(db, "user", f"验证码登录: {email}", user_id=user.id)
     return Token(access_token=create_access_token({"sub": user.username}))
 
 
