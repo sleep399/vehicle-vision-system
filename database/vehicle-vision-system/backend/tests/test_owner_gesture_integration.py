@@ -1,8 +1,10 @@
 from pathlib import Path
+from unittest.mock import patch
 
 from app.routers.owner_gesture import router as owner_router
 from app.services.owner_gesture_service import (
     OWNER_GESTURES,
+    STANDBY_ALLOWED_ACTIONS,
     OwnerGestureService,
     owner_gesture_service,
 )
@@ -91,6 +93,162 @@ def test_vehicle_controls_match_the_documented_owner_actions():
     assert state["phone_status"] == "idle"
 
 
+def test_left_and_right_actions_cycle_all_four_control_items():
+    service = _service_without_models()
+    state = {
+        "volume": 50,
+        "temperature": 24,
+        "phone_status": "idle",
+        "current_page": "volume_up",
+        "is_awake": 1,
+    }
+
+    next_pages = []
+    for _ in range(4):
+        service.apply_action_to_state("next_page", state)
+        next_pages.append(state["current_page"])
+    assert next_pages == ["volume_down", "temp_up", "temp_down", "volume_up"]
+
+    previous_pages = []
+    for _ in range(4):
+        service.apply_action_to_state("prev_page", state)
+        previous_pages.append(state["current_page"])
+    assert previous_pages == ["temp_down", "temp_up", "volume_down", "volume_up"]
+
+
+def test_circle_and_fist_adjust_each_selected_control():
+    service = _service_without_models()
+    cases = {
+        "volume_up": ("volume", 50, 55),
+        "volume_down": ("volume", 50, 45),
+        "temp_up": ("temperature", 24, 25),
+        "temp_down": ("temperature", 24, 23),
+    }
+
+    for action in ("volume_adjust", "confirm"):
+        for current_page, (field, initial, expected) in cases.items():
+            state = {
+                "volume": 50,
+                "temperature": 24,
+                "phone_status": "idle",
+                "current_page": current_page,
+                "is_awake": 1,
+            }
+            assert state[field] == initial
+            service.apply_action_to_state(action, state)
+            assert state[field] == expected
+
+
+def test_phone_shortcuts_remain_available_while_vehicle_ui_is_asleep():
+    service = _service_without_models()
+    assert STANDBY_ALLOWED_ACTIONS == {"wake", "answer_call", "hang_up"}
+
+    for action in ("answer_call", "hang_up"):
+        allowed_action, needs_confirmation, blocked = service._gate_action_for_standby(
+            action,
+            False,
+            {"is_awake": 0, "current_page": "standby"},
+            respect_standby=True,
+            confirm_mode=False,
+        )
+        assert allowed_action == action
+        assert needs_confirmation is False
+        assert blocked is None
+
+    state = {
+        "volume": 50,
+        "temperature": 24,
+        "phone_status": "idle",
+        "current_page": "standby",
+        "is_awake": 0,
+    }
+    service.apply_action_to_state("answer_call", state)
+    assert state["phone_status"] == "in_call"
+    assert state["is_awake"] == 0
+    service.apply_action_to_state("hang_up", state)
+    assert state["phone_status"] == "idle"
+
+    blocked_action, needs_confirmation, blocked = service._gate_action_for_standby(
+        "next_page",
+        False,
+        {"is_awake": 0, "current_page": "standby"},
+        respect_standby=True,
+        confirm_mode=False,
+    )
+    assert blocked_action is None
+    assert needs_confirmation is False
+    assert blocked == "next_page"
+
+    service._pending_confirm = {
+        "gesture": "fist",
+        "gesture_cn": "握拳",
+        "confidence": 0.8,
+        "action": "confirm",
+    }
+    blocked_action, needs_confirmation, blocked = service._gate_action_for_standby(
+        None,
+        True,
+        {"is_awake": 0, "current_page": "standby"},
+        respect_standby=True,
+        confirm_mode=False,
+    )
+    assert blocked_action is None
+    assert needs_confirmation is False
+    assert blocked == "confirm"
+    assert service.has_pending_confirm() is False
+
+
+def test_uploaded_video_keeps_phone_shortcut_action_while_vehicle_ui_is_asleep():
+    class OneFrameCapture:
+        def __init__(self):
+            self.read_count = 0
+
+        def isOpened(self):
+            return True
+
+        def read(self):
+            self.read_count += 1
+            return (True, object()) if self.read_count == 1 else (False, None)
+
+        def get(self, _property):
+            return 0.0
+
+        def release(self):
+            return None
+
+    service = _service_without_models()
+    service._reset_runtime_state = lambda *args, **kwargs: None
+    service.recognize_frame = lambda *args, **kwargs: {
+        "gesture": "thumb_up",
+        "gesture_cn": "拇指向上",
+        "confidence": 0.9,
+        "action": "answer_call",
+    }
+    service._select_video_best_result = lambda results: dict(results[-1])
+    initial_state = {
+        "volume": 50,
+        "temperature": 24,
+        "phone_status": "idle",
+        "current_page": "standby",
+        "is_awake": 0,
+    }
+
+    with patch(
+        "app.services.owner_gesture_service.cv2.VideoCapture",
+        return_value=OneFrameCapture(),
+    ):
+        payload = service.process_video(
+            Path("standby-thumb-up.mp4"),
+            vehicle_state=initial_state,
+            respect_standby=True,
+        )
+
+    assert payload["best_result"]["action"] == "answer_call"
+    assert payload["best_result"]["vehicle_state"]["phone_status"] == "in_call"
+    assert payload["final_vehicle_state"]["phone_status"] == "in_call"
+    assert payload["final_vehicle_state"]["is_awake"] == 0
+
+
 def test_low_confidence_confirm_is_deferred_and_can_be_accepted():
     service = _service_without_models()
     action, pending = service._maybe_defer_for_confirmation("fist", 0.8, "confirm")
@@ -162,3 +320,7 @@ def test_owner_public_routes_and_frontend_contract_are_present():
     assert '.phone-status.in-call' in css
     assert "this.updatePhoneState(s.phone_status)" in js
     assert "card.setAttribute('aria-current'" in js
+    assert "this.updateOwnerFunctionHighlight(this.ownerCurrentControl)" in js
+    assert "this.ownerCurrentControl = controlItems.includes(s.current_page) ? s.current_page : 'volume_up'" in js
+    assert "names[this.ownerCurrentControl] || this.ownerCurrentControl" in js
+    assert "const isStandbyPhoneShortcut = ['answer_call', 'hang_up'].includes(data.action)" in js

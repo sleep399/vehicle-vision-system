@@ -1002,7 +1002,8 @@ const App = {
       document.getElementById('police-result').innerHTML = `${data.gesture_cn}<br><small>置信度 ${(data.confidence*100).toFixed(0)}%</small>`;
       this.loadPoliceHistory();
     } else if (module === 'owner') {
-      if (this.isOwnerStandbyLocked() && !this.isWakeResult(data)) {
+      const isStandbyPhoneShortcut = ['answer_call', 'hang_up'].includes(data.action);
+      if (this.isOwnerStandbyLocked() && !this.isWakeResult(data) && !isStandbyPhoneShortcut) {
         if (this.currentView === 'owner') this.showStandby();
         return;
       }
@@ -1216,15 +1217,16 @@ const App = {
     if (!s) return;
     this.ownerVehicleState = { ...s };
     document.getElementById('v-awake').textContent = s.is_awake ? '已唤醒' : '休眠';
-    this.ownerCurrentControl = s.current_page || 'volume_up';
+    const controlItems = ['volume_up', 'volume_down', 'temp_up', 'temp_down'];
+    this.ownerCurrentControl = controlItems.includes(s.current_page) ? s.current_page : 'volume_up';
     const names = { volume_up: '音量 +', volume_down: '音量 -', temp_up: '温度 +', temp_down: '温度 -', standby: '待机主页' };
-    document.getElementById('v-page').textContent = names[s.current_page] || s.current_page;
+    document.getElementById('v-page').textContent = names[this.ownerCurrentControl] || this.ownerCurrentControl;
     document.getElementById('v-volume').value = s.volume;
     document.getElementById('v-volume-val').textContent = s.volume;
     document.getElementById('v-temp').value = s.temperature;
     document.getElementById('v-temp-val').textContent = s.temperature;
     this.updatePhoneState(s.phone_status);
-    this.updateOwnerFunctionHighlight(s.current_page);
+    this.updateOwnerFunctionHighlight(this.ownerCurrentControl);
     this.publishOwnerVehicleState?.(this.ownerVehicleState);
     if (s.current_page === 'standby' && !s.is_awake) {
       if (this.currentView === 'owner' && (this.isOwnerStandbyLocked() || !this.ownerStandbyDismissed)) {
@@ -1240,9 +1242,9 @@ const App = {
   },
 
   updateOwnerFunctionHighlight(current) {
-    const selected = ['volume_up', 'volume_down', 'temp_up', 'temp_down'].includes(current)
-      ? current
-      : null;
+    const controlItems = ['volume_up', 'volume_down', 'temp_up', 'temp_down'];
+    const selected = controlItems.includes(current) ? current : 'volume_up';
+    this.ownerCurrentControl = selected;
     document.querySelectorAll('#owner-function-selector .function-card').forEach(card => {
       const isSelected = card.dataset.control === selected;
       card.classList.toggle('active', isSelected);

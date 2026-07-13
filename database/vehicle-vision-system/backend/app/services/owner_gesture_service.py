@@ -34,6 +34,8 @@ CONFIRM_REQUIRED_ACTIONS = {"confirm"}
 CONFIRM_CONFIDENCE_THRESHOLD = 0.85
 ACTION_CONFIDENCE_THRESHOLD = 0.78
 MOTION_CONFIDENCE_THRESHOLD = 0.72
+# 接听/挂断属于无需唤醒车机界面的快捷动作，休眠时也应可用。
+STANDBY_ALLOWED_ACTIONS = {"wake", "answer_call", "hang_up"}
 
 
 class HandLandmark:
@@ -1613,11 +1615,17 @@ class OwnerGestureService:
                 action, needs_confirmation = self._maybe_defer_for_confirmation(
                     gesture, confidence, action)
 
+            action, needs_confirmation, blocked_action = self._gate_action_for_standby(
+                action,
+                needs_confirmation,
+                vehicle_state,
+                respect_standby=respect_standby,
+                confirm_mode=confirm_mode,
+            )
+            if blocked_action:
+                debug_info["blocked_action_in_standby"] = blocked_action
+
             if respect_standby and not confirm_mode:
-                if not vehicle_state.get("is_awake") and action and action != "wake":
-                    debug_info["blocked_action_in_standby"] = action
-                    action = None
-                    needs_confirmation = False
                 if action == "wake" and now < self._wake_lock_until:
                     debug_info["blocked_wake_lock"] = round(self._wake_lock_until - now, 3)
                     action = None
@@ -1686,6 +1694,37 @@ class OwnerGestureService:
             }
             return None, True
         return action, False
+
+    def _gate_action_for_standby(
+        self,
+        action: str | None,
+        needs_confirmation: bool,
+        vehicle_state: dict,
+        *,
+        respect_standby: bool,
+        confirm_mode: bool,
+    ) -> tuple[str | None, bool, str | None]:
+        """休眠时保留电话快捷动作，只拦截需要先唤醒界面的控车动作。"""
+        blocked_action = None
+        pending_action = (
+            self._pending_confirm.get("action")
+            if needs_confirmation and self._pending_confirm
+            else None
+        )
+        candidate_action = action or pending_action
+        if (
+            respect_standby
+            and not confirm_mode
+            and not vehicle_state.get("is_awake")
+            and candidate_action
+            and candidate_action not in STANDBY_ALLOWED_ACTIONS
+        ):
+            blocked_action = candidate_action
+            action = None
+            needs_confirmation = False
+            if pending_action:
+                self._pending_confirm = None
+        return action, needs_confirmation, blocked_action
 
     def _annotate(self, annotated, en, confidence, action, needs_confirmation):
         return
@@ -1929,14 +1968,21 @@ class OwnerGestureService:
         if best_result:
             resolved_state = dict(initial_state)
             best_action = best_result.get("action")
-            if respect_standby and not initial_state.get("is_awake") and best_action != "wake":
+            resolved_action, _, blocked_action = self._gate_action_for_standby(
+                best_action,
+                False,
+                initial_state,
+                respect_standby=respect_standby,
+                confirm_mode=False,
+            )
+            if blocked_action:
                 best_result = dict(best_result)
                 best_result["action"] = None
                 best_result["vehicle_state"] = dict(resolved_state)
                 final_state = dict(resolved_state)
             else:
-                if best_action:
-                    resolved_state = self.apply_action_to_state(best_action, resolved_state)
+                if resolved_action:
+                    resolved_state = self.apply_action_to_state(resolved_action, resolved_state)
                 best_result = dict(best_result)
                 best_result["vehicle_state"] = dict(resolved_state)
                 final_state = dict(resolved_state)

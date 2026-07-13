@@ -2320,7 +2320,8 @@
       volume_up: '音量 +', volume_down: '音量 -', temp_up: '温度 +', temp_down: '温度 -', standby: '待机主页',
     };
     const current = state.current_page || 'volume_up';
-    const selectedControl = ['volume_up', 'volume_down', 'temp_up', 'temp_down'].includes(current) ? current : null;
+    const controlItems = ['volume_up', 'volume_down', 'temp_up', 'temp_down'];
+    const selectedControl = controlItems.includes(current) ? current : 'volume_up';
     const awakeEl = document.getElementById('mirror-owner-awake');
     const volumeEl = document.getElementById('mirror-owner-volume');
     const volumeFill = document.getElementById('mirror-owner-volume-fill');
@@ -2341,7 +2342,7 @@
       phoneEl.classList.toggle('in-call', phoneInCall);
       phoneEl.classList.toggle('idle', !phoneInCall);
     }
-    if (selectionEl) selectionEl.textContent = names[current] || current;
+    if (selectionEl) selectionEl.textContent = names[selectedControl] || selectedControl;
     document.querySelectorAll('.mirror-control-chip[data-control]').forEach(chip => {
       const selected = chip.dataset.control === selectedControl;
       chip.classList.toggle('active', selected);

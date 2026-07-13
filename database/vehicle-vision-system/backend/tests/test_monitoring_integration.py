@@ -126,7 +126,7 @@ def test_monitoring_frontend_exposes_structured_alerts_and_chinese_logs():
     js += (BACKEND_DIR / "static" / "js" / "monitoring-workbench.js").read_text(encoding="utf-8")
     assert 'id="assistant-context-bar"' in html
     assert 'id="test-alert-type"' in html
-    assert 'monitoring-workbench.js?v=20260713-mirror2' in html
+    assert 'monitoring-workbench.js?v=20260713-ownerfix1' in html
     assert '<option value="警告">警告</option>' in html
     assert "severity_assessment" in js
     assert "focusedAlertId" in js
@@ -206,7 +206,8 @@ def test_alert_center_mirrors_original_module_runtime_without_second_capture_pat
     ]
     assert "publishRecognitionResult" in mirror_runtime
     assert "publishOwnerVehicleState" in mirror_runtime
-    assert "? current : null" in workbench
+    assert "const selectedControl = controlItems.includes(current) ? current : 'volume_up'" in workbench
+    assert "selectionEl.textContent = names[selectedControl] || selectedControl" in workbench
     assert "options.acceptVehicleState !== false" in workbench
     assert "state.result = null" in workbench
     assert "new WebSocket" not in mirror_runtime
