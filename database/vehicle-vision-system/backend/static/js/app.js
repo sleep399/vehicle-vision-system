@@ -1,5 +1,6 @@
 const App = {
   token: localStorage.getItem('token') || '',
+  currentUser: null,
   wsAlerts: null,
   alertSse: null,
   logSse: null,
@@ -29,7 +30,7 @@ const App = {
   cameraOpenPromise: null,
   alertScenarioLogSse: null,
 
-  init() {
+  async init() {
     this.bindTabs();
     this.bindNav();
     this.bindFileInputs();
@@ -37,8 +38,18 @@ const App = {
     this.bindPoliceImageViewer();
     if (this.initSelectChevrons) this.initSelectChevrons();
     if (this.initAssistant) this.initAssistant();
-    if (this.token) this.showMain();
-    else document.getElementById('login-page').classList.add('active');
+    if (this.token) {
+      try {
+        this.currentUser = await this.api('/api/auth/me');
+        this.showMain();
+        return;
+      } catch (_error) {
+        this.token = '';
+        this.currentUser = null;
+        localStorage.removeItem('token');
+      }
+    }
+    document.getElementById('login-page').classList.add('active');
   },
 
   BACKEND_PORT: 8001,
@@ -52,6 +63,12 @@ const App = {
   apiUrl(path) {
     if (!path || /^https?:\/\//i.test(path)) return path;
     return `${this.backendOrigin()}${path.startsWith('/') ? path : `/${path}`}`;
+  },
+
+  eventStreamUrl(path) {
+    const url = new URL(this.apiUrl(path));
+    if (this.token) url.searchParams.set('token', this.token);
+    return url.toString();
   },
 
   wsBase() {
@@ -416,19 +433,30 @@ const App = {
     if (this.connectSSE) this.connectSSE();
     if (this.refreshAgentStats) this.refreshAgentStats();
     if (this.startAgentMonitorLoop) this.startAgentMonitorLoop();
-    if (this.token) {
+    if (this.currentUser) {
+      document.getElementById('user-info').textContent = this.currentUser.username;
+    } else if (this.token) {
       this.api('/api/auth/me').then(u => {
+        this.currentUser = u;
         document.getElementById('user-info').textContent = u.username;
       }).catch(() => {});
     }
   },
 
-  logout() {
-    this.token = '';
-    localStorage.removeItem('token');
+  async logout() {
+    try {
+      await this.stopVideoStream();
+    } catch (_error) {}
     if (this.stopAllModuleStreams) this.stopAllModuleStreams();
+    if (this.token) {
+      try {
+        await this.api('/api/auth/logout', { method: 'POST' });
+      } catch (_error) {}
+    }
+    this.token = '';
+    this.currentUser = null;
+    localStorage.removeItem('token');
     if (this.disconnectAlertScenarioLogStream) this.disconnectAlertScenarioLogStream();
-    this.stopVideoStream();
     if (this.disconnectSSE) this.disconnectSSE();
     if (this.stopAgentMonitorLoop) this.stopAgentMonitorLoop();
     location.reload();
@@ -803,7 +831,8 @@ const App = {
     runtime.busy = false;
     this.uploadedRecognitionResults = [];
     const ctx = canvas.getContext('2d');
-    const ws = new WebSocket(`${this.wsBase()}/ws/stream/police`);
+    const tokenQuery = this.token ? `?token=${encodeURIComponent(this.token)}` : '';
+    const ws = new WebSocket(`${this.wsBase()}/ws/stream/police${tokenQuery}`);
     runtime.ws = ws;
     this.setRecognitionMirrorStatus?.('police', 'connecting', '正在连接识别服务', runtime.source);
     const sampleFps = 15;
@@ -1711,9 +1740,7 @@ const App = {
       streamPreview.removeAttribute('src');
     }
 
-    const tokenQuery = module === 'owner' && this.token
-      ? `?token=${encodeURIComponent(this.token)}`
-      : '';
+    const tokenQuery = this.token ? `?token=${encodeURIComponent(this.token)}` : '';
     const ws = new WebSocket(`${this.wsBase()}/ws/stream-url/${module}${tokenQuery}`);
     runtime.ws = ws;
     ws.onopen = () => {
@@ -1905,7 +1932,10 @@ const App = {
         mirrorStatus: 'connecting',
         mirrorStatusText: '等待实时画面',
       });
-      const previewUrl = data.preview_url || '';
+      const rawPreviewUrl = data.preview_url || '';
+      const previewUrl = rawPreviewUrl && this.token
+        ? `${rawPreviewUrl}${rawPreviewUrl.includes('?') ? '&' : '?'}token=${encodeURIComponent(this.token)}`
+        : rawPreviewUrl;
       this.lprRtspSourceName = data.source_name || 'live1';
       this.lprRtspUrl = rtspUrl;
       if (previewUrl) {
@@ -2376,7 +2406,7 @@ const App = {
 
   connectAlertSse() {
     if (this.alertSse) return;
-    this.alertSse = new EventSource(this.apiUrl('/api/monitor/stream'));
+    this.alertSse = new EventSource(this.eventStreamUrl('/api/monitor/stream'));
     this.alertSse.onmessage = event => {
       const data = JSON.parse(event.data || '{}');
       if (data.type === 'alert') { this.showToast(data); this.loadAlerts(); }
@@ -2533,7 +2563,7 @@ const App = {
       if (status) status.textContent = '未连接';
       return;
     }
-    this.logSse = new EventSource(this.apiUrl('/api/monitor/logs/stream'));
+    this.logSse = new EventSource(this.eventStreamUrl('/api/monitor/logs/stream'));
     this.logSse.onopen = () => { const status = document.getElementById('log-stream-status'); if (status) status.textContent = '已连接'; };
     this.logSse.onmessage = () => { this.loadLogs(); this.loadLogStats(); };
     this.logSse.onerror = () => { this.logSse?.close(); this.logSse = null; if (button) button.textContent = '开启实时日志'; const status = document.getElementById('log-stream-status'); if (status) status.textContent = '连接中断'; };

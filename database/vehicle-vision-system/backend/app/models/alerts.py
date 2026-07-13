@@ -7,6 +7,7 @@ class AlertEvent(Base):
     __tablename__ = "alert_events"
 
     id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, nullable=True, index=True)
     level = Column(String(16), index=True)
     event_type = Column(String(64), index=True)
     title = Column(String(256), nullable=False)

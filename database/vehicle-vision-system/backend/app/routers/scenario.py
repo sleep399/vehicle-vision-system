@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.services.scenario_fusion_service import scenario_fusion_service
+from app.utils.auth import get_current_user
 
 router = APIRouter(prefix="/api/scenario", tags=["多路感知融合"])
 
@@ -28,20 +29,22 @@ class ResolveConflictRequest(BaseModel):
 
 
 @router.get("/snapshot", summary="多路感知实时快照")
-def get_snapshot() -> dict[str, Any]:
+def get_snapshot(user=Depends(get_current_user)) -> dict[str, Any]:
     """返回 LPR / 交警 / 车主三路最近信号与冲突概况。"""
-    return scenario_fusion_service.get_snapshot()
+    return scenario_fusion_service.get_snapshot(user_id=user.id if user else None)
 
 
 @router.get("/advice", summary="跨模块融合驾驶建议（LLM）")
 async def get_driving_advice(
     force_refresh: bool = False,
     force_template: bool = False,
+    user=Depends(get_current_user),
 ) -> dict[str, Any]:
     """综合车牌 + 交警手势 + 车主控车，由 LLM 生成综合驾驶建议。"""
     return await scenario_fusion_service.get_driving_advice(
         force_refresh=force_refresh,
         force_template=force_template,
+        user_id=user.id if user else None,
     )
 
 
@@ -50,22 +53,28 @@ def list_conflicts(
     status: str | None = None,
     limit: int = 20,
     db: Session = Depends(get_db),
+    user=Depends(get_current_user),
 ):
     """查询近期场景冲突及融合建议。"""
-    return {
-        "items": scenario_fusion_service.list_conflicts(db, status=status, limit=limit),
-        "total": len(scenario_fusion_service.list_conflicts(db, status=status, limit=limit)),
-    }
+    items = scenario_fusion_service.list_conflicts(
+        db,
+        status=status,
+        limit=limit,
+        user_id=user.id if user else None,
+    )
+    return {"items": items, "total": len(items)}
 
 
 @router.post("/evaluate", summary="手动触发场景冲突评估（演示/测试）")
 async def evaluate_scenario(
     body: EvaluateRequest,
     db: Session = Depends(get_db),
+    user=Depends(get_current_user),
 ):
     """注入模拟信号并执行冲突判定，用于联调与演示。"""
     await scenario_fusion_service.ingest_lpr(
         db, success=True, plate_count=len(body.plates), plates=body.plates, source="manual_evaluate",
+        user_id=user.id if user else None,
     )
     await scenario_fusion_service.ingest_police(
         db,
@@ -73,6 +82,7 @@ async def evaluate_scenario(
         gesture_cn=body.police_gesture_cn,
         confidence=body.confidence,
         source="manual_evaluate",
+        user_id=user.id if user else None,
     )
     conflict = await scenario_fusion_service.ingest_owner(
         db,
@@ -80,11 +90,12 @@ async def evaluate_scenario(
         action=body.owner_action,
         confidence=body.confidence,
         source="manual_evaluate",
+        user_id=user.id if user else None,
     )
     return {
         "conflict_detected": conflict is not None,
         "conflict": scenario_fusion_service._conflict_to_dict(conflict) if conflict else None,
-        "snapshot": scenario_fusion_service.get_snapshot(),
+        "snapshot": scenario_fusion_service.get_snapshot(user_id=user.id if user else None),
     }
 
 
@@ -93,10 +104,16 @@ def resolve_conflict(
     conflict_id: int,
     body: ResolveConflictRequest | None = None,
     db: Session = Depends(get_db),
+    user=Depends(get_current_user),
 ):
     """操作员确认按融合建议处置，解除车主动作抑制并联动关闭关联告警。"""
     note = body.resolution_note if body else None
-    result = scenario_fusion_service.resolve_conflict(db, conflict_id, resolution_note=note)
+    result = scenario_fusion_service.resolve_conflict(
+        db,
+        conflict_id,
+        resolution_note=note,
+        user_id=user.id if user else None,
+    )
     if not result:
         raise HTTPException(404, "场景冲突记录不存在")
     return {"message": "场景冲突已处置", "conflict": result}

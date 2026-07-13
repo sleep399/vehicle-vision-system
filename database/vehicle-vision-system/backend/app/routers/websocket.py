@@ -45,8 +45,8 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["WebSocket"])
 _recognition_executor = ThreadPoolExecutor(max_workers=6, thread_name_prefix="stream-recognition")
 _owner_inference_lock = threading.Lock()
-_stream_last_logged: dict[tuple[str, str], tuple[tuple, float]] = {}
-_stream_last_error: dict[tuple[str, str], tuple[str, float]] = {}
+_stream_last_logged: dict[tuple[str, int | None, str], tuple[tuple, float]] = {}
+_stream_last_error: dict[tuple[str, int | None, str], tuple[str, float]] = {}
 _LOG_REFRESH_SECONDS = 5.0
 _MAX_BACKGROUND_LOG_TASKS = 64
 _background_log_tasks: set[asyncio.Task] = set()
@@ -91,8 +91,13 @@ def _is_meaningful_stream_result(module: str, result: dict) -> bool:
     )
 
 
-def _should_log_result(module: str, source_id: str, result: dict) -> bool:
-    key = (module, source_id)
+def _should_log_result(
+    module: str,
+    source_id: str,
+    result: dict,
+    user_id: int | None = None,
+) -> bool:
+    key = (module, user_id, source_id)
     signature = _stream_state_signature(module, result)
     now = time.monotonic()
     previous = _stream_last_logged.get(key)
@@ -105,8 +110,13 @@ def _should_log_result(module: str, source_id: str, result: dict) -> bool:
     return True
 
 
-def _should_log_error(module: str, source_id: str, message: str) -> bool:
-    key = (module, source_id)
+def _should_log_error(
+    module: str,
+    source_id: str,
+    message: str,
+    user_id: int | None = None,
+) -> bool:
+    key = (module, user_id, source_id)
     now = time.monotonic()
     previous = _stream_last_error.get(key)
     if previous and previous[0] == message and now - previous[1] < _LOG_REFRESH_SECONDS:
@@ -115,9 +125,13 @@ def _should_log_error(module: str, source_id: str, message: str) -> bool:
     return True
 
 
-def _forget_stream_log_state(module: str, source_id: str) -> None:
-    _stream_last_logged.pop((module, source_id), None)
-    _stream_last_error.pop((module, source_id), None)
+def _forget_stream_log_state(
+    module: str,
+    source_id: str,
+    user_id: int | None = None,
+) -> None:
+    _stream_last_logged.pop((module, user_id, source_id), None)
+    _stream_last_error.pop((module, user_id, source_id), None)
 
 
 async def _log_stream_result(
@@ -129,7 +143,7 @@ async def _log_stream_result(
     _skip_dedupe: bool = False,
 ) -> None:
     """Send every distinct/refresh result through the shared monitor pipeline."""
-    if not _skip_dedupe and not _should_log_result(module, source_id, result):
+    if not _skip_dedupe and not _should_log_result(module, source_id, result, user_id):
         return
     db = SessionLocal()
     try:
@@ -173,7 +187,13 @@ async def _log_stream_result(
                 extra=common_extra,
             )
     except Exception as exc:
-        log_exception(db, module, "[WebSocket流] 日志写入失败", exc)
+        log_exception(
+            db,
+            module,
+            "[WebSocket流] 日志写入失败",
+            exc,
+            user_id=user_id,
+        )
     finally:
         db.close()
 
@@ -188,7 +208,7 @@ def _schedule_stream_result_log(
     if len(_background_log_tasks) >= _MAX_BACKGROUND_LOG_TASKS:
         logger.warning("实时识别日志队列已满，丢弃一条重复状态: %s/%s", module, source_id)
         return
-    if not _should_log_result(module, source_id, result):
+    if not _should_log_result(module, source_id, result, user_id):
         return
     task = asyncio.create_task(
         _log_stream_result(
@@ -218,7 +238,7 @@ async def _log_stream_error(
     message: str,
     user_id: int | None = None,
 ) -> None:
-    if not _should_log_error(module, source_id, message):
+    if not _should_log_error(module, source_id, message, user_id):
         return
     db = SessionLocal()
     try:
@@ -239,35 +259,47 @@ async def _log_stream_error(
                 source_id=source_id, user_id=user_id, extra=extra,
             )
     except Exception as exc:
-        log_exception(db, module, "[WebSocket流] 错误日志写入失败", exc)
+        log_exception(
+            db,
+            module,
+            "[WebSocket流] 错误日志写入失败",
+            exc,
+            user_id=user_id,
+        )
     finally:
         db.close()
 
 
-def _resolve_websocket_user_id(websocket: WebSocket) -> int | None:
+def _resolve_websocket_user_id(websocket: WebSocket) -> tuple[bool, int | None]:
     token = websocket.query_params.get("token")
     if not token:
-        return None
+        return True, None
     try:
         payload = jwt.decode(token, settings.secret_key, algorithms=["HS256"])
         username = payload.get("sub")
     except JWTError:
-        return None
+        return False, None
     if not username:
-        return None
+        return False, None
     db = SessionLocal()
     try:
         try:
             user = db.query(User).filter(User.username == username).first()
-            return user.id if user else None
+            if not user or not user.is_active:
+                return False, None
+            return True, user.id
         except Exception as exc:
-            logger.warning("WebSocket 用户解析失败，降级为匿名流: %s", exc)
-            return None
+            logger.warning("WebSocket 用户解析失败，拒绝令牌流: %s", exc)
+            return False, None
     finally:
         db.close()
 
 
-def _owner_recognize_sync(frame: np.ndarray, vehicle_state: dict) -> dict:
+def _owner_recognize_sync(
+    frame: np.ndarray,
+    vehicle_state: dict,
+    user_id: int | None,
+) -> dict:
     # OwnerGestureService keeps debounce/confirmation state; serialize its
     # realtime calls while still keeping expensive inference off the event loop.
     with _owner_inference_lock:
@@ -276,6 +308,7 @@ def _owner_recognize_sync(frame: np.ndarray, vehicle_state: dict) -> dict:
             vehicle_state=vehicle_state,
             respect_standby=True,
             realtime_mode=True,
+            context_id=user_id,
         )
 
 
@@ -295,6 +328,7 @@ async def _recognize_owner_frame(
         _owner_recognize_sync,
         frame,
         vehicle_state,
+        user_id,
     )
     result = dict(result)
 
@@ -362,11 +396,19 @@ def _update_police_confirmation(
 @router.websocket("/ws/alerts")
 async def ws_alerts(websocket: WebSocket):
     await websocket.accept()
-    alert_agent.register_ws(websocket)
+    token_valid, user_id = _resolve_websocket_user_id(websocket)
+    if not token_valid:
+        await websocket.send_json({"type": "error", "message": "令牌无效或已过期"})
+        await websocket.close(code=1008)
+        return
+
+    alert_agent.register_ws(websocket, user_id=user_id)
     try:
         while True:
             await websocket.receive_text()
     except WebSocketDisconnect:
+        pass
+    finally:
         alert_agent.unregister_ws(websocket)
 
 
@@ -379,10 +421,19 @@ async def ws_stream(websocket: WebSocket, module: str):
         await websocket.close()
         return
 
+    token_valid, user_id = _resolve_websocket_user_id(websocket)
+    if not token_valid:
+        await websocket.send_json({"type": "error", "message": "令牌无效或已过期"})
+        await websocket.close(code=1008)
+        return
+
     owner_session_id: str | None = None
     if module == "owner":
         owner_session_id = f"owner-browser-{uuid.uuid4().hex}"
-        if not owner_gesture_service.acquire_realtime_session(owner_session_id):
+        if not owner_gesture_service.acquire_realtime_session(
+            owner_session_id,
+            context_id=user_id,
+        ):
             await websocket.send_json(
                 {"type": "error", "message": "车主实时识别已在其他通道运行"}
             )
@@ -392,7 +443,6 @@ async def ws_stream(websocket: WebSocket, module: str):
     frame_index = 0
     source_ids: set[str] = set()
     bound_source_id: str | None = None
-    user_id = _resolve_websocket_user_id(websocket)
     sequence_state = None
     if module == "police":
         try:
@@ -491,7 +541,7 @@ async def ws_stream(websocket: WebSocket, module: str):
             pass
     finally:
         for source_id in source_ids:
-            _forget_stream_log_state(module, source_id)
+            _forget_stream_log_state(module, source_id, user_id)
         if owner_session_id is not None:
             owner_gesture_service.release_realtime_session(owner_session_id)
 
@@ -513,10 +563,19 @@ async def ws_stream_url(websocket: WebSocket, module: str):
         await websocket.close()
         return
 
+    token_valid, user_id = _resolve_websocket_user_id(websocket)
+    if not token_valid:
+        await websocket.send_json({"type": "error", "message": "令牌无效或已过期"})
+        await websocket.close(code=1008)
+        return
+
     owner_session_id: str | None = None
     if module == "owner":
         owner_session_id = f"owner-network-{uuid.uuid4().hex}"
-        if not owner_gesture_service.acquire_realtime_session(owner_session_id):
+        if not owner_gesture_service.acquire_realtime_session(
+            owner_session_id,
+            context_id=user_id,
+        ):
             await websocket.send_json(
                 {"type": "error", "message": "车主实时识别已在其他通道运行"}
             )
@@ -527,7 +586,6 @@ async def ws_stream_url(websocket: WebSocket, module: str):
     disconnect_task: asyncio.Task | None = None
     source_id = "network"
     loop = asyncio.get_running_loop()
-    user_id = _resolve_websocket_user_id(websocket)
     try:
         try:
             start_msg = json.loads(await websocket.receive_text())
@@ -659,6 +717,6 @@ async def ws_stream_url(websocket: WebSocket, module: str):
             disconnect_task.cancel()
         if subscription is not None:
             await loop.run_in_executor(None, subscription.close)
-        _forget_stream_log_state(module, source_id)
+        _forget_stream_log_state(module, source_id, user_id)
         if owner_session_id is not None:
             owner_gesture_service.release_realtime_session(owner_session_id)

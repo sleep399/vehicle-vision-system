@@ -203,7 +203,7 @@ def test_capture_open_failure_is_reported_without_real_camera():
     assert factory.calls[0][2].release_count == 1
 
 
-def test_log_deduplication_is_scoped_by_module_and_source_id(monkeypatch):
+def test_log_deduplication_is_scoped_by_user_module_and_source_id(monkeypatch):
     websocket_router._stream_last_logged.clear()
     monkeypatch.setattr(websocket_router.time, "monotonic", lambda: 10.0)
     result = {"gesture": "stop", "confidence": 0.9}
@@ -212,6 +212,8 @@ def test_log_deduplication_is_scoped_by_module_and_source_id(monkeypatch):
     assert not websocket_router._should_log_result("police", "camera-a", result)
     assert websocket_router._should_log_result("police", "camera-b", result)
     assert websocket_router._should_log_result("owner", "camera-a", result)
+    assert websocket_router._should_log_result("police", "camera-a", result, user_id=7)
+    assert websocket_router._should_log_result("police", "camera-a", result, user_id=8)
 
 
 def test_empty_frames_do_not_periodically_accumulate_false_failures(monkeypatch):
@@ -250,8 +252,9 @@ class FakeWebSocket:
     async def accept(self) -> None:
         self.accepted = True
 
-    async def close(self) -> None:
+    async def close(self, code: int | None = None) -> None:
         self.closed = True
+        self.close_code = code
 
     async def receive_text(self) -> str:
         if not self._messages:
@@ -266,6 +269,70 @@ def json_message(payload: dict) -> str:
     import json
 
     return json.dumps(payload)
+
+
+def test_websocket_identity_keeps_guests_but_rejects_invalid_tokens():
+    assert websocket_router._resolve_websocket_user_id(FakeWebSocket([])) == (True, None)
+    assert websocket_router._resolve_websocket_user_id(
+        FakeWebSocket([], token="not-a-valid-jwt")
+    ) == (False, None)
+
+
+def test_browser_stream_rejects_invalid_token_before_recognition(monkeypatch):
+    websocket = FakeWebSocket([], token="expired")
+    monkeypatch.setattr(
+        websocket_router,
+        "_resolve_websocket_user_id",
+        lambda _ws: (False, None),
+    )
+
+    asyncio.run(websocket_router.ws_stream(websocket, "lpr"))
+
+    assert websocket.accepted
+    assert websocket.closed
+    assert websocket.close_code == 1008
+    assert websocket.sent == [{"type": "error", "message": "令牌无效或已过期"}]
+
+
+def test_alert_websocket_registers_in_authenticated_user_scope(monkeypatch):
+    websocket = DisconnectingWebSocket([])
+    registrations: list[tuple[object, int | None]] = []
+    unregistered: list[object] = []
+    monkeypatch.setattr(websocket_router, "_resolve_websocket_user_id", lambda _ws: (True, 42))
+    monkeypatch.setattr(
+        websocket_router.alert_agent,
+        "register_ws",
+        lambda ws, user_id=None: registrations.append((ws, user_id)),
+    )
+    monkeypatch.setattr(
+        websocket_router.alert_agent,
+        "unregister_ws",
+        lambda ws: unregistered.append(ws),
+    )
+
+    asyncio.run(websocket_router.ws_alerts(websocket))
+
+    assert registrations == [(websocket, 42)]
+    assert unregistered == [websocket]
+
+
+def test_alert_websocket_rejects_invalid_token(monkeypatch):
+    websocket = FakeWebSocket([], token="expired")
+    registrations: list[object] = []
+    monkeypatch.setattr(websocket_router, "_resolve_websocket_user_id", lambda _ws: (False, None))
+    monkeypatch.setattr(
+        websocket_router.alert_agent,
+        "register_ws",
+        lambda ws, user_id=None: registrations.append((ws, user_id)),
+    )
+
+    asyncio.run(websocket_router.ws_alerts(websocket))
+
+    assert websocket.accepted
+    assert websocket.closed
+    assert websocket.close_code == 1008
+    assert websocket.sent == [{"type": "error", "message": "令牌无效或已过期"}]
+    assert registrations == []
 
 
 def test_browser_stream_echoes_source_id_without_database(monkeypatch):
@@ -366,7 +433,7 @@ def test_network_url_route_supports_all_modules_without_camera_or_db(monkeypatch
         lambda _url: subscription,
     )
     monkeypatch.setattr(websocket_router, "_recognize_stream_frame", fake_recognize)
-    monkeypatch.setattr(websocket_router, "_resolve_websocket_user_id", lambda _ws: 42)
+    monkeypatch.setattr(websocket_router, "_resolve_websocket_user_id", lambda _ws: (True, 42))
     monkeypatch.setattr(websocket_router, "_log_stream_result", no_log)
     monkeypatch.setattr(websocket_router, "_log_stream_error", no_log)
     monkeypatch.setattr(
@@ -403,7 +470,7 @@ def test_owner_network_frame_preserves_control_state_with_mock_session(monkeypat
     monkeypatch.setattr(
         websocket_router,
         "_owner_recognize_sync",
-        lambda _frame, state: {"gesture": "thumbs_up", "action": "answer_call", "input": state},
+        lambda _frame, state, _user_id: {"gesture": "thumbs_up", "action": "answer_call", "input": state},
     )
 
     def fake_apply(_db, uid, action, source):
@@ -442,7 +509,7 @@ def test_network_route_releases_subscription_when_client_disconnects(monkeypatch
         "subscribe",
         lambda _url: subscription,
     )
-    monkeypatch.setattr(websocket_router, "_resolve_websocket_user_id", lambda _ws: None)
+    monkeypatch.setattr(websocket_router, "_resolve_websocket_user_id", lambda _ws: (True, None))
 
     asyncio.run(websocket_router.ws_stream_url(websocket, "lpr"))
     assert subscription.closed

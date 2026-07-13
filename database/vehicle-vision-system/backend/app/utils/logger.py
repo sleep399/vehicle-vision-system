@@ -251,7 +251,7 @@ def write_log(
         "detail_json": detail_obj,
         "user_id": log.user_id,
         "created_at": localize_utc(log.created_at),
-    })
+    }, user_id=user_id)
 
     return log
 
@@ -281,6 +281,7 @@ def write_alert_log(
     event_type: str,
     summary: str,
     channels: str,
+    user_id: int | None = None,
 ):
     """专门的告警日志记录"""
     from app.services.alert_agent import EVENT_TYPES
@@ -307,6 +308,7 @@ def write_alert_log(
         f"告警 #{alert_id} · {event_label} · {alert_level_to_cn(level)} — {summary}",
         level=alert_log_level,
         detail=detail,
+        user_id=user_id,
     )
     _py_logger.log(_level_std_to_py(alert_log_level), f"ALERT [{event_type}] {title} | channels={channels} | {summary}")
 
@@ -316,9 +318,10 @@ def write_agent_log(
     message: str,
     level: str = "INFO",
     detail: dict | None = None,
+    user_id: int | None = None,
 ) -> SystemLog:
     """智能体决策日志（告警级别判定、冷却抑制、推送决策等）"""
-    return write_log(db, "agent", message, level=level, detail=detail)
+    return write_log(db, "agent", message, level=level, detail=detail, user_id=user_id)
 
 
 def write_system_log(
@@ -326,6 +329,7 @@ def write_system_log(
     message: str,
     level: str = "INFO",
     detail: dict | None = None,
+    user_id: int | None = None,
 ) -> SystemLog:
     """系统运行日志（启动、关闭、健康检查、配置校验等）"""
-    return write_log(db, "system", message, level=level, detail=detail)
+    return write_log(db, "system", message, level=level, detail=detail, user_id=user_id)

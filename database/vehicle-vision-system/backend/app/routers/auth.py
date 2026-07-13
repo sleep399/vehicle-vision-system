@@ -41,7 +41,7 @@ def register(data: UserCreate, db: Session = Depends(get_db)):
     except IntegrityError as exc:
         db.rollback()
         raise HTTPException(409, "用户名或邮箱已被占用，请更换后重试") from exc
-    write_log(db, "user", f"用户注册: {data.username}")
+    write_log(db, "user", f"用户注册: {data.username}", user_id=user.id)
     token = create_access_token({"sub": user.username})
     return Token(access_token=token)
 
@@ -50,7 +50,13 @@ def register(data: UserCreate, db: Session = Depends(get_db)):
 def login(data: UserLogin, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.username == data.username).first()
     if not user or not user.is_active or not user.hashed_password or not verify_password(data.password, user.hashed_password):
-        write_log(db, "user", f"登录失败: {data.username}", level="WARN")
+        write_log(
+            db,
+            "user",
+            f"登录失败: {data.username}",
+            level="WARN",
+            user_id=user.id if user else None,
+        )
         raise HTTPException(401, "用户名或密码错误")
     if not user.hashed_password.startswith("$2"):
         user.hashed_password = hash_password(data.password)
@@ -107,7 +113,12 @@ def send_code(data: SendCodeRequest, db: Session = Depends(get_db)):
     )
     db.add(vc)
     db.commit()
-    write_log(db, "user", f"{data.purpose} 验证码已发送")
+    write_log(
+        db,
+        "user",
+        f"{data.purpose} 验证码已发送",
+        user_id=user.id if user else None,
+    )
     return {"message": "验证码已发送，请查收邮件", "expires_in": 300}
 
 

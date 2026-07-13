@@ -82,100 +82,139 @@ class AlertAgent:
 
     def __init__(self):
         # ── 感知状态 ──
-        self._failure_counts: defaultdict[str, deque] = defaultdict(lambda: deque(maxlen=20))
-        self._confidence_history: defaultdict[str, deque] = defaultdict(lambda: deque(maxlen=20))
-        self._failure_timestamps: defaultdict[str, deque] = defaultdict(lambda: deque(maxlen=100))
+        self._failure_counts: defaultdict[object, deque] = defaultdict(lambda: deque(maxlen=20))
+        self._confidence_history: defaultdict[object, deque] = defaultdict(lambda: deque(maxlen=20))
+        self._failure_timestamps: defaultdict[object, deque] = defaultdict(lambda: deque(maxlen=100))
         self._token_usage: dict[str, int] = {"used": 0, "limit": settings.alert_token_limit}
+        self._token_usage_by_user: dict[int, dict[str, int]] = {}
 
         # ── 推送通道 ──
-        self._ws_clients: set = set()
-        self._sse_queues: list[asyncio.Queue] = []
+        self._ws_clients: dict[Any, int | None] = {}
+        self._sse_queues: dict[asyncio.Queue, int | None] = {}
         self._lock = asyncio.Lock()
 
         # ── 告警冷却（去重） ──
-        self._last_alert_time: dict[str, datetime] = {}
+        self._last_alert_time: dict[object, datetime] = {}
         self._patrol_task: asyncio.Task | None = None
+
+    @staticmethod
+    def _scope_key(user_id: int | None, key: str) -> object:
+        """游客沿用旧键以保持兼容；账号状态使用 (user_id, key) 隔离。"""
+        return key if user_id is None else (user_id, key)
+
+    def _token_usage_for(self, user_id: int | None) -> dict[str, int]:
+        if user_id is None:
+            return self._token_usage
+        return self._token_usage_by_user.setdefault(
+            user_id,
+            {"used": 0, "limit": settings.alert_token_limit},
+        )
 
     # ════════════════════════════════════════════
     # 连接管理
     # ════════════════════════════════════════════
 
-    def register_ws(self, ws):
-        self._ws_clients.add(ws)
+    def register_ws(self, ws, user_id: int | None = None):
+        self._ws_clients[ws] = user_id
 
     def unregister_ws(self, ws):
-        self._ws_clients.discard(ws)
+        self._ws_clients.pop(ws, None)
 
-    def register_sse(self, queue: asyncio.Queue):
-        self._sse_queues.append(queue)
+    def register_sse(self, queue: asyncio.Queue, user_id: int | None = None):
+        self._sse_queues[queue] = user_id
 
     def unregister_sse(self, queue: asyncio.Queue):
-        try:
-            self._sse_queues.remove(queue)
-        except ValueError:
-            pass
+        self._sse_queues.pop(queue, None)
 
-    async def broadcast(self, data: dict):
+    async def broadcast(self, data: dict, user_id: int | None = None):
         """WebSocket 广播"""
+        scope_user_id = data.get("user_id", user_id)
         dead = []
-        for ws in self._ws_clients:
+        for ws, client_user_id in list(self._ws_clients.items()):
+            if client_user_id != scope_user_id:
+                continue
             try:
                 await ws.send_json(data)
             except Exception:
                 dead.append(ws)
         for ws in dead:
-            self._ws_clients.discard(ws)
+            self._ws_clients.pop(ws, None)
 
-    async def broadcast_sse(self, data: dict):
+    async def broadcast_sse(self, data: dict, user_id: int | None = None):
         """SSE 广播"""
-        for q in self._sse_queues[:]:
+        scope_user_id = data.get("user_id", user_id)
+        for q, client_user_id in list(self._sse_queues.items()):
+            if client_user_id != scope_user_id:
+                continue
             try:
                 q.put_nowait(data)
             except asyncio.QueueFull:
                 pass
 
+    def connection_counts(self, user_id: int | None = None) -> dict[str, int]:
+        return {
+            "websocket_clients": sum(1 for value in self._ws_clients.values() if value == user_id),
+            "sse_clients": sum(1 for value in self._sse_queues.values() if value == user_id),
+        }
+
+    def get_token_usage(self, user_id: int | None = None) -> dict[str, int | float]:
+        usage = self._token_usage_for(user_id)
+        used = usage["used"]
+        limit = usage["limit"]
+        return {
+            "used": used,
+            "limit": limit,
+            "remaining": max(limit - used, 0),
+            "ratio": round(used / max(limit, 1) * 100, 1),
+        }
+
     # ════════════════════════════════════════════
     # 感知模块 —— 记录各模块运行状态
     # ════════════════════════════════════════════
 
-    def record_lpr_result(self, success: bool):
+    def record_lpr_result(self, success: bool, user_id: int | None = None):
         """记录车牌识别结果（成功/失败）"""
-        self._failure_counts["lpr"].append(0 if success else 1)
-        self._failure_timestamps["lpr"].append((datetime.utcnow(), success))
+        key = self._scope_key(user_id, "lpr")
+        self._failure_counts[key].append(0 if success else 1)
+        self._failure_timestamps[key].append((datetime.utcnow(), success))
 
-    def record_gesture_confidence(self, module: str, confidence: float):
+    def record_gesture_confidence(self, module: str, confidence: float, user_id: int | None = None):
         """记录手势识别置信度"""
-        self._confidence_history[module].append(confidence)
+        self._confidence_history[self._scope_key(user_id, module)].append(confidence)
 
-    def record_gesture_failure(self, module: str):
+    def record_gesture_failure(self, module: str, user_id: int | None = None):
         """记录手势识别失败（等效于置信度 0）"""
-        self._confidence_history[module].append(0.0)
+        self._confidence_history[self._scope_key(user_id, module)].append(0.0)
 
-    def record_llm_call(self, success: bool, tokens_used: int = 0):
+    def record_llm_call(self, success: bool, tokens_used: int = 0, user_id: int | None = None):
         """记录 LLM API 调用情况与 Token 用量"""
-        self._token_usage["used"] += tokens_used
+        usage = self._token_usage_for(user_id)
+        usage["used"] += tokens_used
+        key = self._scope_key(user_id, "llm")
         if not success:
-            self._failure_counts["llm"].append(1)
+            self._failure_counts[key].append(1)
         else:
-            self._failure_counts["llm"].append(0)
+            self._failure_counts[key].append(0)
 
-    def record_db_connection(self, success: bool):
+    def record_db_connection(self, success: bool, user_id: int | None = None):
         """记录数据库连接状态"""
-        self._failure_counts["db"].append(0 if success else 1)
+        self._failure_counts[self._scope_key(user_id, "db")].append(0 if success else 1)
 
-    def record_webhook_result(self, success: bool):
+    def record_webhook_result(self, success: bool, user_id: int | None = None):
         """记录 Webhook 推送结果"""
+        key = self._scope_key(user_id, "webhook")
         if not success:
-            self._failure_counts["webhook"].append(1)
+            self._failure_counts[key].append(1)
         else:
-            self._failure_counts["webhook"].append(0)
+            self._failure_counts[key].append(0)
 
-    def record_email_result(self, success: bool):
+    def record_email_result(self, success: bool, user_id: int | None = None):
         """记录邮件推送结果"""
+        key = self._scope_key(user_id, "email")
         if not success:
-            self._failure_counts["email"].append(1)
+            self._failure_counts[key].append(1)
         else:
-            self._failure_counts["email"].append(0)
+            self._failure_counts[key].append(0)
 
     @staticmethod
     def _count_trailing_ones(items: list[int | float]) -> int:
@@ -188,17 +227,18 @@ class AlertAgent:
                 break
         return count
 
-    def get_perception_snapshot(self) -> dict[str, Any]:
+    def get_perception_snapshot(self, user_id: int | None = None) -> dict[str, Any]:
         """返回各模块实时感知状态，供智能助手问答使用。"""
         snapshot: dict[str, Any] = {}
         now = datetime.utcnow()
         window = timedelta(seconds=settings.alert_window_seconds)
 
-        lpr_fails = list(self._failure_counts.get("lpr", []))
+        lpr_key = self._scope_key(user_id, "lpr")
+        lpr_fails = list(self._failure_counts.get(lpr_key, []))
         if lpr_fails:
             recent = lpr_fails[-10:]
             window_records = [
-                (ts, ok) for ts, ok in self._failure_timestamps.get("lpr", [])
+                (ts, ok) for ts, ok in self._failure_timestamps.get(lpr_key, [])
                 if ts >= now - window
             ]
             window_total = len(window_records)
@@ -216,7 +256,7 @@ class AlertAgent:
 
         gesture_modules: dict[str, Any] = {}
         for module in ("police", "owner"):
-            confs = list(self._confidence_history.get(module, []))
+            confs = list(self._confidence_history.get(self._scope_key(user_id, module), []))
             if not confs:
                 continue
             recent_5 = confs[-5:]
@@ -233,9 +273,10 @@ class AlertAgent:
         if gesture_modules:
             snapshot["gesture"] = gesture_modules
 
-        llm_fails = list(self._failure_counts.get("llm", []))
-        used = self._token_usage["used"]
-        limit = self._token_usage["limit"]
+        llm_fails = list(self._failure_counts.get(self._scope_key(user_id, "llm"), []))
+        token_usage = self._token_usage_for(user_id)
+        used = token_usage["used"]
+        limit = token_usage["limit"]
         snapshot["llm"] = {
             "token_used": used,
             "token_limit": limit,
@@ -243,24 +284,24 @@ class AlertAgent:
             "recent_api_failures": int(sum(llm_fails[-3:])) if llm_fails else 0,
         }
 
-        db_fails = list(self._failure_counts.get("db", []))
+        db_fails = list(self._failure_counts.get(self._scope_key(user_id, "db"), []))
         if db_fails:
             snapshot["database"] = {
                 "consecutive_failures": self._count_trailing_ones(db_fails),
             }
 
-        unauth = list(self._failure_timestamps.get("unauthorized", []))
+        unauth = list(self._failure_timestamps.get(self._scope_key(user_id, "unauthorized"), []))
         if unauth:
             snapshot["unauthorized_access"] = {
                 "attempts_in_window": sum(1 for ts, _ in unauth if ts >= now - window),
                 "window_seconds": settings.alert_window_seconds,
             }
 
-        webhook_fails = list(self._failure_counts.get("webhook", []))
+        webhook_fails = list(self._failure_counts.get(self._scope_key(user_id, "webhook"), []))
         if webhook_fails:
             snapshot["webhook"] = {"recent_failures": int(sum(webhook_fails[-5:]))}
 
-        email_fails = list(self._failure_counts.get("email", []))
+        email_fails = list(self._failure_counts.get(self._scope_key(user_id, "email"), []))
         if email_fails:
             snapshot["email"] = {"recent_failures": int(sum(email_fails[-5:]))}
 
@@ -270,33 +311,48 @@ class AlertAgent:
     # 感知与检测 —— 周期检查异常事件
     # ════════════════════════════════════════════
 
-    async def track_llm_success(self, db: Session, tokens_used: int = 0) -> None:
+    async def track_llm_success(
+        self,
+        db: Session,
+        tokens_used: int = 0,
+        user_id: int | None = None,
+    ) -> None:
         """记录 LLM 成功调用并检查 Token/失败率异常"""
-        self.record_llm_call(success=True, tokens_used=tokens_used)
-        await self.check_and_alert(db, "llm")
+        self.record_llm_call(success=True, tokens_used=tokens_used, user_id=user_id)
+        await self.check_and_alert(db, "llm", user_id=user_id)
 
-    async def check_and_alert(self, db: Session, module: str) -> AlertEvent | None:
+    async def check_and_alert(
+        self,
+        db: Session,
+        module: str,
+        user_id: int | None = None,
+    ) -> AlertEvent | None:
         """感知系统异常并触发告警"""
         event = None
 
         if module == "lpr":
-            event = await self._check_lpr_anomalies(db)
+            event = await self._check_lpr_anomalies(db, user_id=user_id)
         elif module in ("police", "owner"):
-            event = await self._check_gesture_anomalies(db, module)
+            event = await self._check_gesture_anomalies(db, module, user_id=user_id)
         elif module == "llm":
-            event = await self._check_llm_anomalies(db)
+            event = await self._check_llm_anomalies(db, user_id=user_id)
         elif module == "db":
-            event = await self._check_db_anomalies(db)
+            event = await self._check_db_anomalies(db, user_id=user_id)
         elif module == "webhook":
-            event = await self._check_webhook_anomalies(db)
+            event = await self._check_webhook_anomalies(db, user_id=user_id)
         elif module == "email":
-            event = await self._check_email_anomalies(db)
+            event = await self._check_email_anomalies(db, user_id=user_id)
 
         return event
 
-    async def _check_lpr_anomalies(self, db: Session) -> AlertEvent | None:
+    async def _check_lpr_anomalies(
+        self,
+        db: Session,
+        user_id: int | None = None,
+    ) -> AlertEvent | None:
         """检测车牌识别异常"""
-        failures = list(self._failure_counts["lpr"])
+        key = self._scope_key(user_id, "lpr")
+        failures = list(self._failure_counts[key])
         threshold = settings.alert_failure_threshold
 
         # 1) 连续失败检测
@@ -305,103 +361,123 @@ class AlertAgent:
             if sum(recent) == threshold:
                 return await self.monitor(
                     db, "lpr_consecutive_failure", "critical",
-                    {"count": threshold, "module": "lpr", "window": f"最近{threshold}次"}
+                    {"count": threshold, "module": "lpr", "window": f"最近{threshold}次"},
+                    user_id=user_id,
                 )
 
         # 2) 滑动窗口失败率检测
         now = datetime.utcnow()
         cutoff = now - timedelta(seconds=settings.alert_window_seconds)
         window_fails = [
-            ts for ts, ok in self._failure_timestamps["lpr"]
+            ts for ts, ok in self._failure_timestamps[key]
             if ts >= cutoff and not ok
         ]
-        window_total = len([ts for ts, _ in self._failure_timestamps["lpr"] if ts >= cutoff])
+        window_total = len([ts for ts, _ in self._failure_timestamps[key] if ts >= cutoff])
         if window_total >= 10:
             rate = len(window_fails) / window_total
             if rate > settings.alert_anomaly_rate_threshold:
                 return await self.monitor(
                     db, "lpr_high_failure_rate", "warning",
                     {"rate": f"{rate:.0%}", "fails": len(window_fails), "total": window_total,
-                     "window_seconds": settings.alert_window_seconds}
+                     "window_seconds": settings.alert_window_seconds},
+                    user_id=user_id,
                 )
 
         return None
 
-    async def _check_gesture_anomalies(self, db: Session, module: str) -> AlertEvent | None:
+    async def _check_gesture_anomalies(
+        self,
+        db: Session,
+        module: str,
+        user_id: int | None = None,
+    ) -> AlertEvent | None:
         """检测手势识别置信度异常"""
-        confs = list(self._confidence_history[module])
+        confs = list(self._confidence_history[self._scope_key(user_id, module)])
         if len(confs) >= 5:
             recent_5 = confs[-5:]
             if all(c < settings.low_confidence_threshold for c in recent_5):
                 avg_conf = sum(recent_5) / 5
                 return await self.monitor(
                     db, "gesture_low_confidence", "warning",
-                    {"confidence": avg_conf, "module": module, "threshold": settings.low_confidence_threshold}
+                    {"confidence": avg_conf, "module": module, "threshold": settings.low_confidence_threshold},
+                    user_id=user_id,
                 )
         return None
 
-    async def _check_llm_anomalies(self, db: Session) -> AlertEvent | None:
+    async def _check_llm_anomalies(
+        self,
+        db: Session,
+        user_id: int | None = None,
+    ) -> AlertEvent | None:
         """检测 LLM 异常（Token 用量 + 调用失败）"""
         # Token 用量检测
-        used = self._token_usage["used"]
-        limit = self._token_usage["limit"]
+        usage = self._token_usage_for(user_id)
+        used = usage["used"]
+        limit = usage["limit"]
         ratio = used / limit if limit > 0 else 0
 
         if ratio >= 1.0:
             return await self.monitor(
                 db, "llm_token_exceeded", "critical",
-                {"used": used, "limit": limit, "ratio": f"{ratio:.1%}"}
+                {"used": used, "limit": limit, "ratio": f"{ratio:.1%}"},
+                user_id=user_id,
             )
         if ratio >= (settings.alert_token_critical_threshold / max(settings.alert_token_limit, 1)):
             return await self.monitor(
                 db, "llm_token_exhausted", "critical",
                 {"used": used, "limit": limit, "ratio": f"{ratio:.1%}",
-                 "remaining": limit - used}
+                 "remaining": limit - used},
+                user_id=user_id,
             )
         if ratio >= (settings.alert_token_warning_threshold / max(settings.alert_token_limit, 1)):
             return await self.monitor(
                 db, "llm_token_exhausted", "warning",
                 {"used": used, "limit": limit, "ratio": f"{ratio:.1%}",
-                 "remaining": limit - used}
+                 "remaining": limit - used},
+                user_id=user_id,
             )
 
         # LLM 调用失败检测
-        llm_fails = list(self._failure_counts["llm"])
+        llm_fails = list(self._failure_counts[self._scope_key(user_id, "llm")])
         if len(llm_fails) >= 3 and sum(llm_fails[-3:]) >= 2:
             return await self.monitor(
                 db, "llm_api_timeout", "critical",
-                {"fails": sum(llm_fails[-3:]), "window": "最近3次"}
+                {"fails": sum(llm_fails[-3:]), "window": "最近3次"},
+                user_id=user_id,
             )
 
         return None
 
-    async def _check_db_anomalies(self, db: Session) -> AlertEvent | None:
+    async def _check_db_anomalies(self, db: Session, user_id: int | None = None) -> AlertEvent | None:
         """检测数据库异常"""
-        fails = list(self._failure_counts["db"])
+        fails = list(self._failure_counts[self._scope_key(user_id, "db")])
         if len(fails) >= 3 and all(f == 1 for f in fails[-3:]):
             return await self.monitor(
                 db, "database_connection_error", "critical",
-                {"consecutive_fails": 3}
+                {"consecutive_fails": 3},
+                user_id=user_id,
             )
         return None
 
-    async def _check_webhook_anomalies(self, db: Session) -> AlertEvent | None:
+    async def _check_webhook_anomalies(self, db: Session, user_id: int | None = None) -> AlertEvent | None:
         """检测 Webhook 推送异常"""
-        fails = list(self._failure_counts["webhook"])
+        fails = list(self._failure_counts[self._scope_key(user_id, "webhook")])
         if len(fails) >= 5 and sum(fails[-5:]) >= 3:
             return await self.monitor(
                 db, "webhook_delivery_failure", "warning",
-                {"fails": sum(fails[-5:]), "window": "最近5次"}
+                {"fails": sum(fails[-5:]), "window": "最近5次"},
+                user_id=user_id,
             )
         return None
 
-    async def _check_email_anomalies(self, db: Session) -> AlertEvent | None:
+    async def _check_email_anomalies(self, db: Session, user_id: int | None = None) -> AlertEvent | None:
         """检测邮件推送异常"""
-        fails = list(self._failure_counts["email"])
+        fails = list(self._failure_counts[self._scope_key(user_id, "email")])
         if len(fails) >= 5 and sum(fails[-5:]) >= 3:
             return await self.monitor(
                 db, "email_delivery_failure", "warning",
-                {"fails": sum(fails[-5:]), "window": "最近5次"}
+                {"fails": sum(fails[-5:]), "window": "最近5次"},
+                user_id=user_id,
             )
         return None
 
@@ -445,13 +521,18 @@ class AlertAgent:
 
         self._patrol_task = asyncio.create_task(_loop())
 
-    def get_recent_agent_logs(self, db: Session, limit: int = 10) -> list[dict]:
+    def get_recent_agent_logs(
+        self,
+        db: Session,
+        limit: int = 10,
+        user_id: int | None = None,
+    ) -> list[dict]:
         """获取最近智能体决策/推送日志"""
         from app.models.logs import SystemLog
 
         rows = (
             db.query(SystemLog)
-            .filter(SystemLog.category == "agent")
+            .filter(SystemLog.category == "agent", SystemLog.user_id == user_id)
             .order_by(SystemLog.created_at.desc())
             .limit(limit)
             .all()
@@ -533,6 +614,7 @@ class AlertAgent:
         context: dict | None = None,
         *,
         force_template: bool = False,
+        user_id: int | None = None,
     ) -> AlertEvent | None:
         """Agent 核心工作流：感知异常 → 决策级别 → 生成摘要 → 推送通知"""
         observed = context or {}
@@ -543,10 +625,11 @@ class AlertAgent:
         observed["original_level"] = level
 
         # 2) 冷却检查（同类型告警间隔）
-        if not self._should_alert(event_type):
+        cooldown_key = self._scope_key(user_id, event_type)
+        if not self._should_alert(event_type, user_id=user_id):
             agent_logger.info(
                 f"Alert suppressed by cooldown: {event_type} "
-                f"(last={self._last_alert_time.get(event_type)})"
+                f"(last={self._last_alert_time.get(cooldown_key)})"
             )
             write_agent_log(
                 db,
@@ -555,8 +638,9 @@ class AlertAgent:
                 detail={
                     "event_type": event_type,
                     "decided_level": decision_level,
-                    "last_alert_at": _localize_utc(self._last_alert_time.get(event_type)),
+                    "last_alert_at": _localize_utc(self._last_alert_time.get(cooldown_key)),
                 },
+                user_id=user_id,
             )
             return None
 
@@ -570,14 +654,22 @@ class AlertAgent:
                 "decided_level": decision_level,
                 "context": observed,
             },
+            user_id=user_id,
         )
 
         # 3) 生成告警
-        return await self.trigger_alert(db, event_type, decision_level, observed, force_template=force_template)
+        return await self.trigger_alert(
+            db,
+            event_type,
+            decision_level,
+            observed,
+            force_template=force_template,
+            user_id=user_id,
+        )
 
-    def _should_alert(self, event_type: str) -> bool:
+    def _should_alert(self, event_type: str, user_id: int | None = None) -> bool:
         """检查是否应该发送告警（冷却机制）"""
-        last = self._last_alert_time.get(event_type)
+        last = self._last_alert_time.get(self._scope_key(user_id, event_type))
         if last is None:
             return True
         cooldown_sec = (
@@ -598,22 +690,32 @@ class AlertAgent:
         context: dict | None = None,
         *,
         force_template: bool = False,
+        user_id: int | None = None,
     ) -> AlertEvent:
         """手动触发告警（绕过冷却）"""
-        return await self._create_alert(db, event_type, level, context or {}, force_template=force_template)
+        return await self._create_alert(
+            db,
+            event_type,
+            level,
+            context or {},
+            force_template=force_template,
+            user_id=user_id,
+        )
 
     async def handle_llm_failure(
         self,
         db: Session,
         exc: Exception,
         context: dict | None = None,
+        user_id: int | None = None,
     ) -> AlertEvent | None:
         """处理 LLM 调用失败（强制模板，避免再次调用 LLM 造成递归）"""
-        self.record_llm_call(success=False)
+        self.record_llm_call(success=False, user_id=user_id)
         return await self.monitor(
             db, "llm_api_timeout", "critical",
             {**(context or {}), "error": str(exc), "error_type": type(exc).__name__},
             force_template=True,
+            user_id=user_id,
         )
 
     async def handle_unauthorized_access(
@@ -622,16 +724,18 @@ class AlertAgent:
         path: str,
         ip: str | None = None,
         user_agent: str | None = None,
+        user_id: int | None = None,
     ) -> AlertEvent:
         """处理未授权访问"""
         # 统计近期未授权访问次数
         now = datetime.utcnow()
         cutoff = now - timedelta(seconds=settings.alert_window_seconds)
+        state_key = self._scope_key(user_id, "unauthorized")
         recent_count = sum(
-            1 for ts, _ in self._failure_timestamps.get("unauthorized", deque())
+            1 for ts, _ in self._failure_timestamps.get(state_key, deque())
             if ts >= cutoff
         ) + 1
-        self._failure_timestamps["unauthorized"].append((now, False))
+        self._failure_timestamps[state_key].append((now, False))
 
         return await self.monitor(
             db, "unauthorized_access", "warning",
@@ -641,7 +745,8 @@ class AlertAgent:
                 "user_agent": user_agent or "unknown",
                 "count": recent_count,
                 "window_seconds": settings.alert_window_seconds,
-            }
+            },
+            user_id=user_id,
         )
 
     async def handle_model_load_failure(
@@ -649,11 +754,13 @@ class AlertAgent:
         db: Session,
         model_name: str,
         exc: Exception,
+        user_id: int | None = None,
     ) -> AlertEvent:
         """处理 AI 模型加载失败"""
         return await self.monitor(
             db, "model_load_failure", "critical",
-            {"model_name": model_name, "error": str(exc), "error_type": type(exc).__name__}
+            {"model_name": model_name, "error": str(exc), "error_type": type(exc).__name__},
+            user_id=user_id,
         )
 
     async def handle_config_missing(
@@ -661,6 +768,7 @@ class AlertAgent:
         db: Session,
         config_key: str,
         severity: str = "warning",
+        user_id: int | None = None,
     ) -> AlertEvent | None:
         """处理关键配置缺失；可选配置（webhook/邮件/LLM）仅记日志，不弹告警。"""
         key = (config_key or "").lower()
@@ -670,11 +778,13 @@ class AlertAgent:
                 f"可选配置未填写: {config_key}（不影响核心功能，已跳过告警）",
                 level="INFO",
                 detail={"config_key": config_key},
+                user_id=user_id,
             )
             return None
         return await self.monitor(
             db, "config_missing", severity,
-            {"config_key": config_key}
+            {"config_key": config_key},
+            user_id=user_id,
         )
 
     async def handle_service_unhealthy(
@@ -682,11 +792,13 @@ class AlertAgent:
         db: Session,
         service_name: str,
         detail: str = "",
+        user_id: int | None = None,
     ) -> AlertEvent:
         """处理服务健康异常"""
         return await self.monitor(
             db, "service_unhealthy", "critical",
-            {"service": service_name, "detail": detail}
+            {"service": service_name, "detail": detail},
+            user_id=user_id,
         )
 
     # ════════════════════════════════════════════
@@ -701,6 +813,7 @@ class AlertAgent:
         context: dict,
         *,
         force_template: bool = False,
+        user_id: int | None = None,
     ) -> AlertEvent:
         """创建告警事件（生成摘要、持久化、多渠道推送）"""
         from app.services.llm_service import llm_service
@@ -708,7 +821,7 @@ class AlertAgent:
 
         # 1) 规则结构化分析 + LLM 自然语言润色（字段互不重叠）
         summary_data = await llm_service.generate_alert_summary(
-            event_type, level, context, force_template=force_template,
+            event_type, level, context, force_template=force_template, user_id=user_id,
         )
         summary_data.pop("_llm_failed", None)
 
@@ -733,6 +846,7 @@ class AlertAgent:
 
         # 2) 持久化
         alert = AlertEvent(
+            user_id=user_id,
             level=level,
             event_type=event_type,
             title=summary_data.get("title", EVENT_TYPES.get(event_type, event_type)),
@@ -742,7 +856,7 @@ class AlertAgent:
             suggestion=merged.get("suggestion"),
             channels_sent="web",
             system_health_json=json.dumps({
-                "perception": self.get_perception_snapshot(),
+                "perception": self.get_perception_snapshot(user_id=user_id),
                 "decision_level": level,
                 "event_type": event_type,
                 "structured": detail_payload.get("structured"),
@@ -754,10 +868,19 @@ class AlertAgent:
         db.refresh(alert)
 
         # 3) 记录告警冷却时间
-        self._last_alert_time[event_type] = now
+        self._last_alert_time[self._scope_key(user_id, event_type)] = now
 
         # 4) 写入告警日志
-        write_alert_log(db, alert.id, level, alert.title, event_type, alert.summary, "web")
+        write_alert_log(
+            db,
+            alert.id,
+            level,
+            alert.title,
+            event_type,
+            alert.summary,
+            "web",
+            user_id=user_id,
+        )
 
         # 5) 构建推送 payload
         payload = {
@@ -775,6 +898,7 @@ class AlertAgent:
             "occurred_at": merged.get("occurred_at"),
             "severity_assessment": merged.get("severity_assessment"),
             "detail": detail_payload,
+            "user_id": user_id,
             "created_at": _localize_utc(alert.created_at),
         }
 
@@ -782,30 +906,30 @@ class AlertAgent:
         channels = ["web"]
 
         # WebSocket 推送
-        await self.broadcast(payload)
+        await self.broadcast(payload, user_id=user_id)
 
         # SSE 推送
         if settings.alert_sse_enabled:
-            await self.broadcast_sse(payload)
+            await self.broadcast_sse(payload, user_id=user_id)
             channels.append("sse")
 
         # Webhook 推送（企业微信/钉钉/飞书）
         if settings.alert_webhook_enabled:
-            if await self._send_webhook(payload):
+            if await self._send_webhook(payload, user_id=user_id):
                 channels.append("webhook")
             else:
-                self.record_webhook_result(False)
+                self.record_webhook_result(False, user_id=user_id)
                 agent_logger.warning("Webhook delivery failed")
-                await self.check_and_alert(db, "webhook")
+                await self.check_and_alert(db, "webhook", user_id=user_id)
 
         # 邮件推送
         if settings.alert_email_enabled:
-            if await self._send_email(alert):
+            if await self._send_email(alert, user_id=user_id):
                 channels.append("email")
             else:
-                self.record_email_result(False)
+                self.record_email_result(False, user_id=user_id)
                 agent_logger.warning("Email delivery failed")
-                await self.check_and_alert(db, "email")
+                await self.check_and_alert(db, "email", user_id=user_id)
 
         # 7) 更新推送渠道
         alert.channels_sent = ",".join(channels)
@@ -824,6 +948,7 @@ class AlertAgent:
                 "channels": channels,
                 "channels_cn": channels_to_cn(channels),
             },
+            user_id=user_id,
         )
 
         agent_logger.info(
@@ -877,7 +1002,7 @@ class AlertAgent:
             "text": {"content": text_content},
         }
 
-    async def _send_webhook(self, payload: dict) -> bool:
+    async def _send_webhook(self, payload: dict, user_id: int | None = None) -> bool:
         """发送 Webhook（支持企业微信/钉钉/飞书群机器人）"""
         if not settings.webhook_url:
             return False
@@ -898,14 +1023,14 @@ class AlertAgent:
             )
             with urllib.request.urlopen(req, timeout=10) as resp:
                 resp.read()
-            self.record_webhook_result(True)
+            self.record_webhook_result(True, user_id=user_id)
             return True
         except Exception as e:
             agent_logger.warning(f"Webhook send failed: {e}")
-            self.record_webhook_result(False)
+            self.record_webhook_result(False, user_id=user_id)
             return False
 
-    async def _send_email(self, alert: AlertEvent) -> bool:
+    async def _send_email(self, alert: AlertEvent, user_id: int | None = None) -> bool:
         """发送邮件通知"""
         if not all([settings.smtp_host, settings.smtp_user, settings.alert_email_to]):
             return False
@@ -945,14 +1070,18 @@ class AlertAgent:
                 server.login(settings.smtp_user, settings.smtp_password)
                 server.send_message(msg)
 
-            self.record_email_result(True)
+            self.record_email_result(True, user_id=user_id)
             return True
         except Exception as e:
             agent_logger.warning(f"Email send failed: {e}")
-            self.record_email_result(False)
+            self.record_email_result(False, user_id=user_id)
             return False
 
-    async def send_test_notification(self, channel: str = "all") -> dict[str, Any]:
+    async def send_test_notification(
+        self,
+        channel: str = "all",
+        user_id: int | None = None,
+    ) -> dict[str, Any]:
         """向指定渠道发送测试通知，不写入告警库。"""
         from types import SimpleNamespace
 
@@ -968,15 +1097,16 @@ class AlertAgent:
             "root_cause": "用户手动触发通知测试",
             "suggestion": "若收到本消息，说明对应渠道配置正常",
             "detail": {"source": "notification_test"},
+            "user_id": user_id,
             "created_at": created_str,
         }
         results: dict[str, Any] = {"channel": channel, "channels": {}}
 
         if channel in ("web", "all"):
-            await self.broadcast(payload)
+            await self.broadcast(payload, user_id=user_id)
             results["channels"]["web"] = {"ok": True}
             if settings.alert_sse_enabled:
-                await self.broadcast_sse(payload)
+                await self.broadcast_sse(payload, user_id=user_id)
                 results["channels"]["sse"] = {"ok": True}
             else:
                 results["channels"]["sse"] = {"ok": False, "reason": "未启用"}
@@ -987,7 +1117,7 @@ class AlertAgent:
             elif not settings.webhook_url:
                 results["channels"]["webhook"] = {"ok": False, "reason": "未配置 URL"}
             else:
-                ok = await self._send_webhook(payload)
+                ok = await self._send_webhook(payload, user_id=user_id)
                 results["channels"]["webhook"] = {"ok": ok}
 
         if channel in ("email", "all"):
@@ -1005,7 +1135,7 @@ class AlertAgent:
                     suggestion=payload["suggestion"],
                     created_at=now,
                 )
-                ok = await self._send_email(fake_alert)
+                ok = await self._send_email(fake_alert, user_id=user_id)
                 results["channels"]["email"] = {"ok": ok}
 
         return results
@@ -1047,11 +1177,15 @@ class AlertAgent:
             "resolved_at": _localize_utc(a.resolved_at),
         }
 
-    def _compute_mttr_minutes(self, db: Session) -> float | None:
+    def _compute_mttr_minutes(self, db: Session, user_id: int | None = None) -> float | None:
         """计算平均处理时长（分钟）"""
         resolved = (
             db.query(AlertEvent)
-            .filter(AlertEvent.status == "resolved", AlertEvent.resolved_at.isnot(None))
+            .filter(
+                AlertEvent.user_id == user_id,
+                AlertEvent.status == "resolved",
+                AlertEvent.resolved_at.isnot(None),
+            )
             .all()
         )
         if not resolved:
@@ -1066,22 +1200,23 @@ class AlertAgent:
                     count += 1
         return round(total_minutes / count, 1) if count else None
 
-    def get_stats(self, db: Session) -> dict[str, Any]:
+    def get_stats(self, db: Session, user_id: int | None = None) -> dict[str, Any]:
         """获取告警统计仪表盘数据"""
         from sqlalchemy import func
 
-        total = db.query(func.count(AlertEvent.id)).scalar() or 0
-        open_count = db.query(func.count(AlertEvent.id)).filter(AlertEvent.status == "open").scalar() or 0
-        resolved_count = db.query(func.count(AlertEvent.id)).filter(AlertEvent.status == "resolved").scalar() or 0
+        scope_filter = AlertEvent.user_id == user_id
+        total = db.query(func.count(AlertEvent.id)).filter(scope_filter).scalar() or 0
+        open_count = db.query(func.count(AlertEvent.id)).filter(scope_filter, AlertEvent.status == "open").scalar() or 0
+        resolved_count = db.query(func.count(AlertEvent.id)).filter(scope_filter, AlertEvent.status == "resolved").scalar() or 0
         open_critical = (
             db.query(func.count(AlertEvent.id))
-            .filter(AlertEvent.status == "open", AlertEvent.level == "critical")
+            .filter(scope_filter, AlertEvent.status == "open", AlertEvent.level == "critical")
             .scalar() or 0
         )
 
-        by_level_rows = db.query(AlertEvent.level, func.count(AlertEvent.id)).group_by(AlertEvent.level).all()
-        by_type_rows = db.query(AlertEvent.event_type, func.count(AlertEvent.id)).group_by(AlertEvent.event_type).all()
-        by_status_rows = db.query(AlertEvent.status, func.count(AlertEvent.id)).group_by(AlertEvent.status).all()
+        by_level_rows = db.query(AlertEvent.level, func.count(AlertEvent.id)).filter(scope_filter).group_by(AlertEvent.level).all()
+        by_type_rows = db.query(AlertEvent.event_type, func.count(AlertEvent.id)).filter(scope_filter).group_by(AlertEvent.event_type).all()
+        by_status_rows = db.query(AlertEvent.status, func.count(AlertEvent.id)).filter(scope_filter).group_by(AlertEvent.status).all()
 
         by_level = {r[0]: r[1] for r in by_level_rows}
         by_type = {r[0]: r[1] for r in by_type_rows}
@@ -1090,10 +1225,16 @@ class AlertAgent:
         now = datetime.utcnow()
         today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         week_start = now - timedelta(days=7)
-        today_count = db.query(func.count(AlertEvent.id)).filter(AlertEvent.created_at >= today_start).scalar() or 0
-        week_count = db.query(func.count(AlertEvent.id)).filter(AlertEvent.created_at >= week_start).scalar() or 0
+        today_count = db.query(func.count(AlertEvent.id)).filter(scope_filter, AlertEvent.created_at >= today_start).scalar() or 0
+        week_count = db.query(func.count(AlertEvent.id)).filter(scope_filter, AlertEvent.created_at >= week_start).scalar() or 0
 
-        recent_alerts = db.query(AlertEvent).order_by(AlertEvent.created_at.desc()).limit(100).all()
+        recent_alerts = (
+            db.query(AlertEvent)
+            .filter(scope_filter)
+            .order_by(AlertEvent.created_at.desc())
+            .limit(100)
+            .all()
+        )
         by_hour: dict[int, int] = defaultdict(int)
         by_date: dict[str, int] = defaultdict(int)
         timeline_data: list[dict] = []
@@ -1132,7 +1273,7 @@ class AlertAgent:
             "open_critical": open_critical,
             "today_count": today_count,
             "week_count": week_count,
-            "mttr_minutes": self._compute_mttr_minutes(db),
+            "mttr_minutes": self._compute_mttr_minutes(db, user_id=user_id),
             "resolution_rate": round(resolved_count / total * 100, 1) if total > 0 else 0,
             "by_level": dict(by_level),
             "by_type": dict(by_type),
@@ -1143,19 +1284,32 @@ class AlertAgent:
             "date_trend": date_trend,
             "recent": timeline_data[:20],
             "token_usage": {
-                "used": self._token_usage["used"],
-                "limit": self._token_usage["limit"],
-                "ratio": round(self._token_usage["used"] / max(self._token_usage["limit"], 1) * 100, 1),
+                "used": self._token_usage_for(user_id)["used"],
+                "limit": self._token_usage_for(user_id)["limit"],
+                "ratio": round(
+                    self._token_usage_for(user_id)["used"]
+                    / max(self._token_usage_for(user_id)["limit"], 1)
+                    * 100,
+                    1,
+                ),
             },
         }
 
-    def get_analytics(self, db: Session, days: int = 7) -> dict[str, Any]:
+    def get_analytics(
+        self,
+        db: Session,
+        days: int = 7,
+        user_id: int | None = None,
+    ) -> dict[str, Any]:
         """获取告警分析仪表盘数据（指定天数范围）"""
         from sqlalchemy import func
 
         days = max(1, min(days, 90))
         cutoff = datetime.utcnow() - timedelta(days=days)
-        rows = db.query(AlertEvent).filter(AlertEvent.created_at >= cutoff).all()
+        rows = db.query(AlertEvent).filter(
+            AlertEvent.user_id == user_id,
+            AlertEvent.created_at >= cutoff,
+        ).all()
 
         by_level: dict[str, int] = defaultdict(int)
         by_type: dict[str, int] = defaultdict(int)
@@ -1216,9 +1370,10 @@ class AlertAgent:
         end: datetime | None = None,
         skip: int = 0,
         limit: int = 30,
+        user_id: int | None = None,
     ) -> dict[str, Any]:
         """获取按日期分组的告警历史时间线"""
-        q = db.query(AlertEvent).order_by(AlertEvent.created_at.desc())
+        q = db.query(AlertEvent).filter(AlertEvent.user_id == user_id).order_by(AlertEvent.created_at.desc())
         if level:
             q = q.filter(AlertEvent.level == level)
         if event_type:
@@ -1410,7 +1565,11 @@ class AlertAgent:
             if event_type.startswith("lpr"):
                 rows = (
                     db.query(LicensePlateRecord)
-                    .filter(LicensePlateRecord.created_at >= start, LicensePlateRecord.created_at <= end)
+                    .filter(
+                        LicensePlateRecord.user_id == alert.user_id,
+                        LicensePlateRecord.created_at >= start,
+                        LicensePlateRecord.created_at <= end,
+                    )
                     .order_by(LicensePlateRecord.created_at.desc())
                     .limit(5)
                     .all()
@@ -1433,7 +1592,11 @@ class AlertAgent:
                 if module == "owner":
                     rows = (
                         db.query(OwnerGestureRecord)
-                        .filter(OwnerGestureRecord.created_at >= start, OwnerGestureRecord.created_at <= end)
+                        .filter(
+                            OwnerGestureRecord.user_id == alert.user_id,
+                            OwnerGestureRecord.created_at >= start,
+                            OwnerGestureRecord.created_at <= end,
+                        )
                         .order_by(OwnerGestureRecord.created_at.desc())
                         .limit(5)
                         .all()
@@ -1450,7 +1613,11 @@ class AlertAgent:
                 else:
                     rows = (
                         db.query(PoliceGestureRecord)
-                        .filter(PoliceGestureRecord.created_at >= start, PoliceGestureRecord.created_at <= end)
+                        .filter(
+                            PoliceGestureRecord.user_id == alert.user_id,
+                            PoliceGestureRecord.created_at >= start,
+                            PoliceGestureRecord.created_at <= end,
+                        )
                         .order_by(PoliceGestureRecord.created_at.desc())
                         .limit(5)
                         .all()
@@ -1469,9 +1636,17 @@ class AlertAgent:
 
         return records
 
-    def get_event_replay(self, db: Session, alert_id: int) -> dict | None:
+    def get_event_replay(
+        self,
+        db: Session,
+        alert_id: int,
+        user_id: int | None = None,
+    ) -> dict | None:
         """获取告警事件回放数据"""
-        alert = db.query(AlertEvent).filter(AlertEvent.id == alert_id).first()
+        alert = db.query(AlertEvent).filter(
+            AlertEvent.id == alert_id,
+            AlertEvent.user_id == user_id,
+        ).first()
         if not alert:
             return None
 
@@ -1497,6 +1672,7 @@ class AlertAgent:
                 .filter(
                     SystemLog.created_at >= time_window_start,
                     SystemLog.created_at <= time_window_end,
+                    SystemLog.user_id == alert.user_id,
                     or_(
                         SystemLog.level.in_(["WARN", "ERROR", "CRITICAL", "警告", "错误", "严重"]),
                         SystemLog.category.in_(categories),
@@ -1519,6 +1695,7 @@ class AlertAgent:
                     message=log.message,
                     detail=log_detail,
                     id=log.id,
+                    user_id=log.user_id,
                     created_at=_localize_utc(log.created_at),
                 ))
 

@@ -29,7 +29,16 @@ from app.utils.scenario_rules import (
 class ScenarioFusionService:
     """汇聚 LPR / 交警 / 车主三路感知，判定冲突并联动告警。"""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        user_id: int | None = None,
+        root_service: "ScenarioFusionService | None" = None,
+    ) -> None:
+        self._scope_user_id = user_id
+        self._root_service = root_service or self
+        self._scoped_services: dict[int, ScenarioFusionService] = {}
+        self._scope_registry_lock = threading.RLock()
         self._state_lock = threading.RLock()
         self._events: deque[dict[str, Any]] = deque(maxlen=200)
         self._last_signals: dict[str, Any] = {
@@ -45,7 +54,34 @@ class ScenarioFusionService:
         self._revision = 0
         self._updated_at: datetime | None = None
 
+    @property
+    def user_id(self) -> int | None:
+        """Return the account owning this in-memory scope; ``None`` is the shared guest scope."""
+        return self._scope_user_id
+
+    def for_user(self, user_id: int | None) -> "ScenarioFusionService":
+        """Return an isolated service state for one account, while guests share the root state."""
+        root = self._root_service
+        if user_id is None:
+            return root
+        if self._scope_user_id == user_id:
+            return self
+        with root._scope_registry_lock:
+            scoped = root._scoped_services.get(user_id)
+            if scoped is None:
+                scoped = ScenarioFusionService(user_id=user_id, root_service=root)
+                root._scoped_services[user_id] = scoped
+            return scoped
+
+    def _scope_for_call(self, user_id: int | None) -> "ScenarioFusionService":
+        """Resolve an explicitly supplied account without redirecting child-local calls."""
+        if user_id is None or self._scope_user_id == user_id:
+            return self
+        return self.for_user(user_id)
+
     def _now(self) -> datetime:
+        if self._root_service is not self:
+            return self._root_service._now()
         return datetime.utcnow()
 
     def _window_cutoff(self) -> datetime:
@@ -71,7 +107,17 @@ class ScenarioFusionService:
         with self._state_lock:
             return self._prune_events_locked()
 
-    def _record_event(self, module: str, payload: dict[str, Any]) -> None:
+    def _record_event(
+        self,
+        module: str,
+        payload: dict[str, Any],
+        *,
+        user_id: int | None = None,
+    ) -> None:
+        scoped = self._scope_for_call(user_id)
+        if scoped is not self:
+            scoped._record_event(module, payload)
+            return
         with self._state_lock:
             now = self._now()
             self._prune_events_locked(now)
@@ -116,8 +162,15 @@ class ScenarioFusionService:
             )
         return source or None, source_id or None
 
-    def _latest_window_events(self) -> dict[str, dict[str, Any] | None]:
+    def _latest_window_events(
+        self,
+        *,
+        user_id: int | None = None,
+    ) -> dict[str, dict[str, Any] | None]:
         """返回时间窗口内各模块最新事件，避免卡片长期展示过期信号。"""
+        scoped = self._scope_for_call(user_id)
+        if scoped is not self:
+            return scoped._latest_window_events()
         latest: dict[str, dict[str, Any] | None] = {
             "lpr": None,
             "police": None,
@@ -150,8 +203,11 @@ class ScenarioFusionService:
             return "已捕获车主控车动作，等待交警手势信号（30 秒窗口内）"
         return ""
 
-    def get_snapshot(self) -> dict[str, Any]:
+    def get_snapshot(self, *, user_id: int | None = None) -> dict[str, Any]:
         """返回多路感知实时快照（供 API / 助手使用）。"""
+        scoped = self._scope_for_call(user_id)
+        if scoped is not self:
+            return scoped.get_snapshot()
         with self._state_lock:
             latest = self._latest_window_events()
             police = latest["police"] or {}
@@ -220,8 +276,15 @@ class ScenarioFusionService:
         *,
         force_refresh: bool = False,
         force_template: bool = False,
+        user_id: int | None = None,
     ) -> dict[str, Any]:
         """跨模块融合推理：综合三路感知生成 LLM 驾驶建议。"""
+        scoped = self._scope_for_call(user_id)
+        if scoped is not self:
+            return await scoped.get_driving_advice(
+                force_refresh=force_refresh,
+                force_template=force_template,
+            )
         snapshot = self.get_snapshot()
         correlated = self._build_correlation_snapshot()
         cache_key = self._advice_cache_key(correlated)
@@ -239,7 +302,10 @@ class ScenarioFusionService:
             return cached
 
         advice = await llm_service.generate_driving_advice(
-            correlated, snapshot, force_template=force_template,
+            correlated,
+            snapshot,
+            force_template=force_template,
+            user_id=self._scope_user_id,
         )
         result = {
             **advice,
@@ -253,7 +319,14 @@ class ScenarioFusionService:
         self._last_driving_advice_key = cache_key
         return result
 
-    def _build_correlation_snapshot(self) -> dict[str, Any]:
+    def _build_correlation_snapshot(
+        self,
+        *,
+        user_id: int | None = None,
+    ) -> dict[str, Any]:
+        scoped = self._scope_for_call(user_id)
+        if scoped is not self:
+            return scoped._build_correlation_snapshot()
         with self._state_lock:
             self._prune_events_locked()
             police = owner = lpr = None
@@ -301,7 +374,19 @@ class ScenarioFusionService:
         source: str = "",
         source_id: str | None = None,
         evaluate_conflicts: bool = True,
+        user_id: int | None = None,
     ) -> ScenarioConflict | None:
+        scoped = self._scope_for_call(user_id)
+        if scoped is not self:
+            return await scoped.ingest_lpr(
+                db,
+                success=success,
+                plate_count=plate_count,
+                plates=plates,
+                source=source,
+                source_id=source_id,
+                evaluate_conflicts=evaluate_conflicts,
+            )
         payload = {
             "success": success,
             "plate_count": plate_count,
@@ -325,7 +410,19 @@ class ScenarioFusionService:
         source: str = "",
         source_id: str | None = None,
         evaluate_conflicts: bool = True,
+        user_id: int | None = None,
     ) -> ScenarioConflict | None:
+        scoped = self._scope_for_call(user_id)
+        if scoped is not self:
+            return await scoped.ingest_police(
+                db,
+                gesture=gesture,
+                gesture_cn=gesture_cn,
+                confidence=confidence,
+                source=source,
+                source_id=source_id,
+                evaluate_conflicts=evaluate_conflicts,
+            )
         if (
             not gesture
             or gesture == "no_gesture"
@@ -356,7 +453,20 @@ class ScenarioFusionService:
         source: str = "",
         source_id: str | None = None,
         evaluate_conflicts: bool = True,
+        user_id: int | None = None,
     ) -> ScenarioConflict | None:
+        scoped = self._scope_for_call(user_id)
+        if scoped is not self:
+            return await scoped.ingest_owner(
+                db,
+                gesture=gesture,
+                gesture_cn=gesture_cn,
+                action=action,
+                confidence=confidence,
+                source=source,
+                source_id=source_id,
+                evaluate_conflicts=evaluate_conflicts,
+            )
         has_gesture = bool(gesture and gesture != "no_gesture")
         if not action and not has_gesture:
             return None
@@ -381,8 +491,16 @@ class ScenarioFusionService:
         *,
         trigger_module: str | None = None,
         force: bool = False,
+        user_id: int | None = None,
     ) -> ScenarioConflict | None:
         """在时间窗口内关联三路信号并判定冲突。"""
+        scoped = self._scope_for_call(user_id)
+        if scoped is not self:
+            return await scoped.evaluate(
+                db,
+                trigger_module=trigger_module,
+                force=force,
+            )
         snapshot = self._build_correlation_snapshot()
         if not snapshot.get("police_gesture") or not snapshot.get("owner_action"):
             return None
@@ -435,6 +553,7 @@ class ScenarioFusionService:
             severity,
             context,
             force_template=True,
+            user_id=self._scope_user_id,
         )
 
         if suppress and alert:
@@ -448,6 +567,7 @@ class ScenarioFusionService:
                     "message": "因场景冲突，车主控车动作已被临时抑制。",
                 },
                 force_template=True,
+                user_id=self._scope_user_id,
             )
 
         if alert:
@@ -457,9 +577,11 @@ class ScenarioFusionService:
                 "info",
                 {**context, "parent_alert_id": alert.id},
                 force_template=True,
+                user_id=self._scope_user_id,
             )
 
         row = ScenarioConflict(
+            user_id=self._scope_user_id,
             scenario_id=scenario_id,
             conflict_type=conflict_type,
             severity=severity,
@@ -488,12 +610,14 @@ class ScenarioFusionService:
                 "fusion_recommendation": rule["recommendation"],
                 "alert_id": alert.id if alert else None,
             },
+            user_id=self._scope_user_id,
         )
         write_agent_log(
             db,
             f"场景融合建议: {rule['recommendation']}",
             level="INFO",
             detail={"scenario_id": scenario_id, "conflict_type": conflict_type},
+            user_id=self._scope_user_id,
         )
         return row
 
@@ -506,6 +630,7 @@ class ScenarioFusionService:
                 sources = row.sources_json
         return {
             "id": row.id,
+            "user_id": row.user_id,
             "scenario_id": row.scenario_id,
             "conflict_type": row.conflict_type,
             "severity": row.severity,
@@ -525,8 +650,16 @@ class ScenarioFusionService:
         *,
         status: str | None = None,
         limit: int = 20,
+        user_id: int | None = None,
     ) -> list[dict[str, Any]]:
+        scoped = self._scope_for_call(user_id)
+        if scoped is not self:
+            return scoped.list_conflicts(db, status=status, limit=limit)
         q = db.query(ScenarioConflict).order_by(ScenarioConflict.created_at.desc())
+        if self._scope_user_id is None:
+            q = q.filter(ScenarioConflict.user_id.is_(None))
+        else:
+            q = q.filter(ScenarioConflict.user_id == self._scope_user_id)
         if status:
             q = q.filter(ScenarioConflict.status == status)
         rows = q.limit(limit).all()
@@ -538,8 +671,21 @@ class ScenarioFusionService:
         conflict_id: int,
         *,
         resolution_note: str | None = None,
+        user_id: int | None = None,
     ) -> dict[str, Any] | None:
-        row = db.query(ScenarioConflict).filter(ScenarioConflict.id == conflict_id).first()
+        scoped = self._scope_for_call(user_id)
+        if scoped is not self:
+            return scoped.resolve_conflict(
+                db,
+                conflict_id,
+                resolution_note=resolution_note,
+            )
+        filters = [ScenarioConflict.id == conflict_id]
+        if self._scope_user_id is None:
+            filters.append(ScenarioConflict.user_id.is_(None))
+        else:
+            filters.append(ScenarioConflict.user_id == self._scope_user_id)
+        row = db.query(ScenarioConflict).filter(*filters).first()
         if not row:
             return None
         row.status = "resolved"
@@ -551,7 +697,12 @@ class ScenarioFusionService:
         if row.alert_id:
             from app.models.alerts import AlertEvent
 
-            alert = db.query(AlertEvent).filter(AlertEvent.id == row.alert_id).first()
+            alert_filters = [AlertEvent.id == row.alert_id]
+            if self._scope_user_id is None:
+                alert_filters.append(AlertEvent.user_id.is_(None))
+            else:
+                alert_filters.append(AlertEvent.user_id == self._scope_user_id)
+            alert = db.query(AlertEvent).filter(*alert_filters).first()
             if alert and alert.status != "resolved":
                 alert.status = "resolved"
                 alert.resolved_at = self._now()
@@ -570,6 +721,7 @@ class ScenarioFusionService:
             f"场景冲突已处置: #{conflict_id}",
             level="INFO",
             detail={"conflict_id": conflict_id, "scenario_id": row.scenario_id},
+            user_id=self._scope_user_id,
         )
         return self._conflict_to_dict(row)
 

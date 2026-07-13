@@ -11,6 +11,7 @@ class ScenarioConflict(Base):
     __tablename__ = "scenario_conflicts"
 
     id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, nullable=True, index=True)
     scenario_id = Column(String(64), index=True, nullable=False)
     conflict_type = Column(String(64), index=True, nullable=False)
     severity = Column(String(16), index=True, nullable=False)

@@ -6,13 +6,15 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse
 from fastapi import APIRouter, Depends, File, UploadFile, HTTPException, Query, Response
 from fastapi.responses import StreamingResponse
+from jose import JWTError, jwt
 from sqlalchemy.orm import Session
-from app.database import get_db
+from app.database import SessionLocal, get_db
 from app.models.records import LicensePlateRecord
+from app.models.user import User
 from app.schemas import LPRResponse
 from app.services.lpr_service import lpr_service
 from app.services.lpr_video_service import lpr_video_service
-from app.utils.auth import get_current_user
+from app.utils.auth import get_current_user, oauth2_scheme
 from app.utils.crypto import encrypt_json, decrypt_json
 from app.utils.recognition_monitor import record_lpr_recognition
 from app.config import settings
@@ -21,6 +23,41 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/lpr", tags=["车牌识别"])
 
 PLATE_RE = re.compile(r"^[\u4e00-\u9fa5A-Z]{1}[A-Z][A-Z0-9]{5}$")
+
+
+def _preview_user_id(token: str | None, user, db: Session) -> int | None:
+    """Resolve the query token used by ``<img>`` MJPEG requests.
+
+    Browser image requests cannot attach the normal Authorization header.  A
+    missing/empty query token therefore remains the shared guest scope, while a
+    supplied but invalid token must never silently fall back to that scope.
+    """
+    if not token:
+        return user.id if user else None
+    try:
+        payload = jwt.decode(token, settings.secret_key, algorithms=["HS256"])
+        username = payload.get("sub")
+    except JWTError as exc:
+        raise HTTPException(401, "令牌无效或已过期") from exc
+    if not username:
+        raise HTTPException(401, "令牌无效或已过期")
+    token_user = db.query(User).filter(User.username == username).first()
+    if not token_user or not token_user.is_active:
+        raise HTTPException(401, "令牌无效或用户不可用")
+    return token_user.id
+
+
+def _preview_scope_user_id(
+    token: str | None = Query(None),
+    bearer_token: str | None = Depends(oauth2_scheme),
+) -> int | None:
+    """Resolve preview identity and release its DB session before streaming starts."""
+    db = SessionLocal()
+    try:
+        user = get_current_user(token=bearer_token, db=db)
+        return _preview_user_id(token, user, db)
+    finally:
+        db.close()
 
 
 @router.post("/recognize", response_model=LPRResponse, summary="上传图片识别车牌")
@@ -217,9 +254,18 @@ async def recognize_rtsp_stream(
         elif rtsp_url.lower().endswith(('.mp4', '.avi', '.mov', '.mkv', '.m4v')):
             local_path = Path(rtsp_url)
         if local_path is not None:
-            summary = lpr_video_service.start_video_file_stream(local_path, source_name=source_name)
+            summary = lpr_video_service.start_video_file_stream(
+                local_path,
+                source_name=source_name,
+                user_id=user.id if user else None,
+            )
         else:
-            summary = lpr_video_service.start_rtsp_stream(rtsp_url=rtsp_url, source_name=source_name, label=label)
+            summary = lpr_video_service.start_rtsp_stream(
+                rtsp_url=rtsp_url,
+                source_name=source_name,
+                label=label,
+                user_id=user.id if user else None,
+            )
     except Exception as e:
         logger.exception("[LPR-API] rtsp start failed")
         await record_lpr_recognition(
@@ -238,16 +284,28 @@ async def recognize_rtsp_stream(
 
 
 @router.get("/preview/{source_name}.mjpg", summary="车牌识别预览流")
-def preview_stream(source_name: str):
+def preview_stream(
+    source_name: str,
+    user_id: int | None = Depends(_preview_scope_user_id),
+):
+    if not lpr_video_service.preview_status(source_name, user_id=user_id).get("found"):
+        raise HTTPException(404, "预览任务不存在")
     return StreamingResponse(
-        lpr_video_service.preview_frame_generator(source_name),
+        lpr_video_service.preview_frame_generator(source_name, user_id=user_id),
         media_type="multipart/x-mixed-replace; boundary=frame",
     )
 
 
 @router.get("/preview/{source_name}/status", summary="车牌识别预览状态")
-def preview_status(source_name: str):
-    return lpr_video_service.preview_status(source_name)
+def preview_status(
+    source_name: str,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    return lpr_video_service.preview_status(
+        source_name,
+        user_id=user.id if user else None,
+    )
 
 
 @router.post("/rtsp/stop", summary="停止沙盘 RTSP 车牌识别")
@@ -260,7 +318,11 @@ async def stop_rtsp_stream(
     source_name = (payload.get("source_name") or payload.get("source") or "live1").strip()
     if not rtsp_url and not source_name:
         raise HTTPException(400, "rtsp_url 或 source_name 不能为空")
-    result = lpr_video_service.stop_rtsp_stream(rtsp_url=rtsp_url, source_name=source_name)
+    result = lpr_video_service.stop_rtsp_stream(
+        rtsp_url=rtsp_url,
+        source_name=source_name,
+        user_id=user.id if user else None,
+    )
     history = result.get("history") or {"plates": [{"plate_number": "未识别", "plate_color": "无", "confidence": 0.0, "max_confidence": 0.0, "hit_count": 0, "frames": [], "frame_index": None, "source": "yolo_lprnet"}]}
     encrypted_plates = encrypt_json({"plates": history.get("plates", [])})
     record = LicensePlateRecord(
@@ -352,7 +414,9 @@ def history(
 ):
     q = db.query(LicensePlateRecord).order_by(LicensePlateRecord.created_at.desc())
     if user:
-        q = q.filter((LicensePlateRecord.user_id == user.id) | (LicensePlateRecord.user_id.is_(None)))
+        q = q.filter(LicensePlateRecord.user_id == user.id)
+    else:
+        q = q.filter(LicensePlateRecord.user_id.is_(None))
     records = q.offset(skip).limit(limit).all()
     items = []
     for r in records:
@@ -375,9 +439,9 @@ def lpr_stats(
 ):
     q = db.query(LicensePlateRecord)
     if user:
-        q = q.filter(
-            (LicensePlateRecord.user_id == user.id) | (LicensePlateRecord.user_id.is_(None))
-        )
+        q = q.filter(LicensePlateRecord.user_id == user.id)
+    else:
+        q = q.filter(LicensePlateRecord.user_id.is_(None))
     total = q.count()
     recent = (
         q.order_by(LicensePlateRecord.created_at.desc())

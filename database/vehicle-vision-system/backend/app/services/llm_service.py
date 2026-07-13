@@ -131,17 +131,25 @@ class LLMService:
             or 0
         )
 
-    async def _track_llm_response(self, resp_data: dict) -> None:
+    async def _track_llm_response(
+        self,
+        resp_data: dict,
+        user_id: int | None = None,
+    ) -> None:
         tokens = self._extract_tokens(resp_data)
         from app.services.alert_agent import alert_agent
 
         db = SessionLocal()
         try:
-            await alert_agent.track_llm_success(db, tokens_used=tokens)
+            await alert_agent.track_llm_success(db, tokens_used=tokens, user_id=user_id)
         finally:
             db.close()
 
-    async def _record_llm_failure(self, exc: Exception | None = None) -> None:
+    async def _record_llm_failure(
+        self,
+        exc: Exception | None = None,
+        user_id: int | None = None,
+    ) -> None:
         from app.services.alert_agent import alert_agent
 
         db = SessionLocal()
@@ -153,6 +161,7 @@ class LLMService:
                 db,
                 exc or RuntimeError("LLM request failed"),
                 {"source": "llm_service"},
+                user_id=user_id,
             )
         finally:
             db.close()
@@ -164,6 +173,7 @@ class LLMService:
         temperature: float = 0.3,
         json_mode: bool = False,
         max_tokens: int | None = None,
+        user_id: int | None = None,
     ) -> dict[str, Any]:
         """统一 OpenAI 兼容 Chat Completions 调用。"""
         if not settings.llm_configured:
@@ -187,10 +197,10 @@ class LLMService:
             resp.raise_for_status()
             data = resp.json()
 
-        await self._track_llm_response(data)
+        await self._track_llm_response(data, user_id=user_id)
         return data
 
-    async def test_connection(self) -> dict[str, Any]:
+    async def test_connection(self, user_id: int | None = None) -> dict[str, Any]:
         """测试 LLM API 连通性（启动时或手动调用）。"""
         if not settings.llm_configured:
             return {
@@ -209,6 +219,7 @@ class LLMService:
                 temperature=0,
                 json_mode=True,
                 max_tokens=64,
+                user_id=user_id,
             )
             content = data["choices"][0]["message"]["content"]
             return {
@@ -224,7 +235,7 @@ class LLMService:
             }
         except Exception as e:
             llm_logger.warning("LLM 智能助手调用失败，降级本地模板: %s", e)
-            await self._record_llm_failure(e)
+            await self._record_llm_failure(e, user_id=user_id)
             llm_logger.warning("LLM 连接测试失败: %s", e)
             return {
                 "ok": False,
@@ -244,6 +255,7 @@ class LLMService:
         *,
         intent: str | None = None,
         history: list[dict[str, str]] | None = None,
+        user_id: int | None = None,
     ) -> str:
         context = context or {}
         q_intent = intent or detect_assistant_intent(question)
@@ -304,6 +316,7 @@ class LLMService:
             data = await self.chat_completion(
                 messages,
                 temperature=0.6,
+                user_id=user_id,
             )
             answer = data["choices"][0]["message"]["content"]
             answer = humanize_tech_terms(self._strip_markdown(answer))
@@ -321,7 +334,7 @@ class LLMService:
             self.last_assistant_reason = ""
             return answer
         except Exception as e:
-            await self._record_llm_failure(e)
+            await self._record_llm_failure(e, user_id=user_id)
             self.last_assistant_mode = "template"
             self.last_assistant_reason = "api_error"
             return self._template_assistant_answer(question, context, intent=q_intent)
@@ -365,6 +378,7 @@ class LLMService:
         context: dict[str, Any],
         *,
         force_template: bool = False,
+        user_id: int | None = None,
     ) -> dict[str, str]:
         """通过 LLM API 生成结构化告警摘要；失败时降级为模板（不递归触发告警）。"""
         if force_template or not settings.llm_configured:
@@ -387,6 +401,7 @@ class LLMService:
                 ],
                 temperature=0.55,
                 json_mode=True,
+                user_id=user_id,
             )
             content = data["choices"][0]["message"]["content"]
             parsed = self._parse_json_response(content)
@@ -394,7 +409,7 @@ class LLMService:
                 return self._normalize_summary(parsed, event_type, level, context)
         except Exception as e:
             llm_logger.warning("LLM 告警摘要生成失败，降级模板: %s", e)
-            await self._record_llm_failure(e)
+            await self._record_llm_failure(e, user_id=user_id)
 
         result = self._template_summary(event_type, level, context)
         result["_llm_failed"] = True
@@ -561,6 +576,7 @@ class LLMService:
         snapshot: dict[str, Any] | None = None,
         *,
         force_template: bool = False,
+        user_id: int | None = None,
     ) -> dict[str, Any]:
         """综合三路感知，由 LLM 生成驾驶建议；失败时降级模板。"""
         from app.utils.driving_advice import build_template_driving_advice
@@ -585,6 +601,7 @@ class LLMService:
                 temperature=0.5,
                 json_mode=True,
                 max_tokens=400,
+                user_id=user_id,
             )
             content = data["choices"][0]["message"]["content"]
             parsed = self._parse_json_response(content)
@@ -603,7 +620,7 @@ class LLMService:
                 }
         except Exception as e:
             llm_logger.warning("LLM 驾驶建议生成失败，降级模板: %s", e)
-            await self._record_llm_failure(e)
+            await self._record_llm_failure(e, user_id=user_id)
 
         result = dict(fallback)
         result["mode"] = "template"

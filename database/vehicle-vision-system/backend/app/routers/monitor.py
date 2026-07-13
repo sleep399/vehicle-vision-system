@@ -18,6 +18,7 @@ from app.services.alert_agent import alert_agent, EVENT_TYPES, DEFAULT_LEVELS
 from app.services.llm_service import llm_service
 from app.services.scenario_fusion_service import scenario_fusion_service
 from app.services.log_stream import register as register_log_sse, unregister as unregister_log_sse, client_count as log_stream_client_count
+from app.utils.auth import get_current_user
 from app.utils.logger import write_log, get_logger, localize_utc, level_to_cn, level_filter_variants
 from app.utils.log_display import format_log_entry, category_cn, sanitize_log_message
 from app.utils.user_language import (
@@ -53,6 +54,24 @@ class MarkResolvedRequest(BaseModel):
     resolution_note: str | None = None
 
 
+def _get_monitor_user(
+    request: Request,
+):
+    """Resolve bearer auth for REST and the query token used by SSE clients."""
+    authorization = request.headers.get("authorization", "")
+    bearer_token = authorization[7:].strip() if authorization.lower().startswith("bearer ") else None
+    token = bearer_token or request.query_params.get("token")
+    db = SessionLocal()
+    try:
+        return get_current_user(token=token, db=db)
+    finally:
+        db.close()
+
+
+def _scope_user_id(user) -> int | None:
+    return getattr(user, "id", None)
+
+
 def _to_utc_naive(dt: datetime | None) -> datetime | None:
     """将查询时间统一为 UTC naive，与数据库存储的 utcnow() 对齐。"""
     if dt is None:
@@ -70,28 +89,32 @@ def _to_utc_naive(dt: datetime | None) -> datetime | None:
 def get_logs(
     category: str | None = None,
     level: str | None = None,
-    user_id: int | None = None,
     search: str | None = Query(None, description="关键词搜索（消息内容）"),
     start: datetime | None = Query(None, description="开始时间，ISO 格式"),
     end: datetime | None = Query(None, description="结束时间，ISO 格式"),
     skip: int = 0,
     limit: int = 50,
     db: Session = Depends(get_db),
+    user=Depends(_get_monitor_user),
 ):
     """查询系统日志，支持多维度过滤。
 
     支持按类别（lpr/police_gesture/owner_gesture/alert/user/system/agent）、
-    级别（信息/警告/错误/严重）、用户ID、关键词和时间范围进行过滤。
+    级别（信息/警告/错误/严重）、关键词和时间范围进行过滤。
+    登录账号仅能查询自己的日志，未登录游客共享游客日志。
     """
-    q = db.query(SystemLog).order_by(SystemLog.created_at.desc())
+    user_id = _scope_user_id(user)
+    q = (
+        db.query(SystemLog)
+        .filter(SystemLog.user_id == user_id)
+        .order_by(SystemLog.created_at.desc())
+    )
     if category:
         q = q.filter(SystemLog.category == category)
     if level:
         variants = level_filter_variants(level)
         if variants:
             q = q.filter(SystemLog.level.in_(variants))
-    if user_id is not None:
-        q = q.filter(SystemLog.user_id == user_id)
     if search:
         q = q.filter(SystemLog.message.contains(search))
     start_utc = _to_utc_naive(start)
@@ -148,12 +171,18 @@ def log_categories():
 def log_stats(
     hours: int = Query(24, description="统计最近N小时"),
     db: Session = Depends(get_db),
+    user=Depends(_get_monitor_user),
 ):
     """获取日志统计概览：各类别/各级别数量汇总"""
     from datetime import timedelta
     cutoff = datetime.utcnow() - timedelta(hours=hours)
 
-    rows = db.query(SystemLog).filter(SystemLog.created_at >= cutoff).all()
+    user_id = _scope_user_id(user)
+    rows = (
+        db.query(SystemLog)
+        .filter(SystemLog.created_at >= cutoff, SystemLog.user_id == user_id)
+        .all()
+    )
 
     by_category: dict[str, int] = {}
     by_level: dict[str, int] = {}
@@ -195,10 +224,11 @@ def log_stats(
 
 
 @router.get("/logs/stream", summary="SSE 实时日志推送")
-async def logs_stream(request: Request):
+async def logs_stream(request: Request, user=Depends(_get_monitor_user)):
     """订阅系统日志写入事件，供监控日志页实时展示新日志。"""
+    user_id = _scope_user_id(user)
     queue: asyncio.Queue = asyncio.Queue(maxsize=200)
-    register_log_sse(queue)
+    register_log_sse(queue, user_id=user_id)
 
     async def event_generator():
         try:
@@ -224,7 +254,6 @@ async def logs_stream(request: Request):
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
-            "Access-Control-Allow-Origin": "*",
         },
     )
 
@@ -243,9 +272,15 @@ def get_alerts(
     skip: int = 0,
     limit: int = 50,
     db: Session = Depends(get_db),
+    user=Depends(_get_monitor_user),
 ):
     """查询告警历史记录，支持多维度过滤"""
-    q = db.query(AlertEvent).order_by(AlertEvent.created_at.desc())
+    user_id = _scope_user_id(user)
+    q = (
+        db.query(AlertEvent)
+        .filter(AlertEvent.user_id == user_id)
+        .order_by(AlertEvent.created_at.desc())
+    )
     if level:
         q = q.filter(AlertEvent.level == level)
     if event_type:
@@ -285,23 +320,24 @@ def get_alerts(
 
 
 @router.get("/alerts/stats", summary="告警统计仪表盘")
-def alert_stats(db: Session = Depends(get_db)):
+def alert_stats(db: Session = Depends(get_db), user=Depends(_get_monitor_user)):
     """获取完整的告警统计仪表盘数据：
     - 各级别/各类型分布
     - 时间趋势
     - 处理率
     - Token 用量
     """
-    return alert_agent.get_stats(db)
+    return alert_agent.get_stats(db, user_id=_scope_user_id(user))
 
 
 @router.get("/alerts/analytics", summary="告警分析仪表盘")
 def alert_analytics(
     days: int = Query(7, ge=1, le=90, description="统计最近N天"),
     db: Session = Depends(get_db),
+    user=Depends(_get_monitor_user),
 ):
     """获取指定天数范围内的告警分析数据：趋势、类型排名、小时分布、MTTR"""
-    return alert_agent.get_analytics(db, days=days)
+    return alert_agent.get_analytics(db, days=days, user_id=_scope_user_id(user))
 
 
 @router.get("/alerts/timeline", summary="告警历史时间线")
@@ -314,11 +350,13 @@ def alert_timeline(
     skip: int = 0,
     limit: int = Query(30, ge=1, le=100),
     db: Session = Depends(get_db),
+    user=Depends(_get_monitor_user),
 ):
     """按日期分组的告警历史时间线，支持分页加载"""
     return alert_agent.get_timeline(
         db, level=level, event_type=event_type, status=status,
         start=start, end=end, skip=skip, limit=limit,
+        user_id=_scope_user_id(user),
     )
 
 
@@ -329,21 +367,29 @@ def event_types():
 
 
 @router.get("/alerts/{alert_id}", summary="告警详情")
-def get_alert_detail(alert_id: int, db: Session = Depends(get_db)):
+def get_alert_detail(
+    alert_id: int,
+    db: Session = Depends(get_db),
+    user=Depends(_get_monitor_user),
+):
     """获取指定告警的详细信息"""
-    replay = alert_agent.get_event_replay(db, alert_id)
+    replay = alert_agent.get_event_replay(db, alert_id, user_id=_scope_user_id(user))
     if not replay:
         raise HTTPException(404, "告警不存在")
     return replay
 
 
 @router.get("/alerts/{alert_id}/replay", summary="告警事件回放")
-def get_alert_replay(alert_id: int, db: Session = Depends(get_db)):
+def get_alert_replay(
+    alert_id: int,
+    db: Session = Depends(get_db),
+    user=Depends(_get_monitor_user),
+):
     """获取告警事件的回放数据：
     - 告警详情（含结构化上下文）
     - 时间窗口内的关联日志
     """
-    replay = alert_agent.get_event_replay(db, alert_id)
+    replay = alert_agent.get_event_replay(db, alert_id, user_id=_scope_user_id(user))
     if not replay:
         raise HTTPException(404, "告警不存在")
     return replay
@@ -354,9 +400,15 @@ def resolve_alert(
     alert_id: int,
     body: MarkResolvedRequest | None = None,
     db: Session = Depends(get_db),
+    user=Depends(_get_monitor_user),
 ):
     """将告警标记为已处理，可附带处理说明"""
-    alert = db.query(AlertEvent).filter(AlertEvent.id == alert_id).first()
+    user_id = _scope_user_id(user)
+    alert = (
+        db.query(AlertEvent)
+        .filter(AlertEvent.id == alert_id, AlertEvent.user_id == user_id)
+        .first()
+    )
     if not alert:
         raise HTTPException(404, "告警不存在")
     if alert.status == "resolved":
@@ -374,6 +426,7 @@ def resolve_alert(
         f"告警 #{alert_id} 已处理: {alert.title}" + (f" ({note})" if note else ""),
         level="INFO",
         detail={"alert_id": alert_id, "note": note},
+        user_id=user_id,
     )
     return {
         "message": "已处理",
@@ -384,12 +437,19 @@ def resolve_alert(
 
 
 @router.post("/alerts/cleanup-noise", summary="清理历史噪声告警")
-def cleanup_noise_alerts(db: Session = Depends(get_db)):
+def cleanup_noise_alerts(
+    db: Session = Depends(get_db),
+    user=Depends(_get_monitor_user),
+):
     """将测试告警、可选配置缺失等历史噪声标记为已处理，避免仪表盘一直显示未处理。"""
     noise_types = ("config_missing", "test_event")
     rows = (
         db.query(AlertEvent)
-        .filter(AlertEvent.status == "open", AlertEvent.event_type.in_(noise_types))
+        .filter(
+            AlertEvent.status == "open",
+            AlertEvent.event_type.in_(noise_types),
+            AlertEvent.user_id == _scope_user_id(user),
+        )
         .all()
     )
     now = datetime.utcnow()
@@ -403,11 +463,15 @@ def cleanup_noise_alerts(db: Session = Depends(get_db)):
 
 
 @router.post("/alerts/test", summary="触发测试告警")
-async def test_alert(db: Session = Depends(get_db)):
+async def test_alert(
+    db: Session = Depends(get_db),
+    user=Depends(_get_monitor_user),
+):
     """手动触发一条测试告警，验证告警链路是否正常"""
     alert = await alert_agent.trigger_alert(
         db, "test_event", "info",
-        {"source": "manual_test", "timestamp": localize_utc(datetime.utcnow())}
+        {"source": "manual_test", "timestamp": localize_utc(datetime.utcnow())},
+        user_id=_scope_user_id(user),
     )
     return {
         "id": alert.id,
@@ -422,14 +486,19 @@ async def test_alert(db: Session = Depends(get_db)):
 
 
 @router.post("/alerts/test/{event_type}", summary="触发指定类型的测试告警")
-async def test_alert_type(event_type: str, db: Session = Depends(get_db)):
+async def test_alert_type(
+    event_type: str,
+    db: Session = Depends(get_db),
+    user=Depends(_get_monitor_user),
+):
     """触发指定类型的测试告警"""
     if event_type not in EVENT_TYPES:
         raise HTTPException(400, f"不支持的告警类型: {event_type}，支持的类型: {list(EVENT_TYPES.keys())}")
     level = DEFAULT_LEVELS.get(event_type, "warning")
     alert = await alert_agent.trigger_alert(
         db, event_type, level,
-        {"source": "manual_test_" + event_type, "timestamp": localize_utc(datetime.utcnow())}
+        {"source": "manual_test_" + event_type, "timestamp": localize_utc(datetime.utcnow())},
+        user_id=_scope_user_id(user),
     )
     return {
         "id": alert.id,
@@ -448,7 +517,7 @@ async def test_alert_type(event_type: str, db: Session = Depends(get_db)):
 # ════════════════════════════════════════════
 
 @router.get("/stream", summary="SSE 实时告警推送", include_in_schema=True)
-async def sse_stream(request: Request):
+async def sse_stream(request: Request, user=Depends(_get_monitor_user)):
     """Server-Sent Events 实时告警推送端点。
 
     客户端通过 EventSource 连接此端点即可接收实时告警事件。
@@ -458,8 +527,9 @@ async def sse_stream(request: Request):
         const es = new EventSource('/api/monitor/stream');
         es.onmessage = (e) => console.log(JSON.parse(e.data));
     """
+    user_id = _scope_user_id(user)
     queue: asyncio.Queue = asyncio.Queue(maxsize=100)
-    alert_agent.register_sse(queue)
+    alert_agent.register_sse(queue, user_id=user_id)
 
     async def event_generator():
         try:
@@ -490,7 +560,6 @@ async def sse_stream(request: Request):
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
-            "Access-Control-Allow-Origin": "*",
         },
     )
 
@@ -500,10 +569,11 @@ async def sse_stream(request: Request):
 # ════════════════════════════════════════════
 
 @router.get("/token-usage", summary="LLM Token 用量")
-def token_usage():
+def token_usage(user=Depends(_get_monitor_user)):
     """获取 LLM Token 用量统计"""
-    used = alert_agent._token_usage["used"]
-    limit = alert_agent._token_usage["limit"]
+    usage = alert_agent.get_token_usage(user_id=_scope_user_id(user))
+    used = usage["used"]
+    limit = usage["limit"]
     return {
         "used": used,
         "limit": limit,
@@ -514,12 +584,13 @@ def token_usage():
 
 
 @router.get("/connections", summary="推送连接状态")
-def connection_status():
+def connection_status(user=Depends(_get_monitor_user)):
     """获取当前 WebSocket/SSE 连接数"""
+    user_id = _scope_user_id(user)
+    counts = alert_agent.connection_counts(user_id=user_id)
     return {
-        "websocket_clients": len(alert_agent._ws_clients),
-        "sse_clients": len(alert_agent._sse_queues),
-        "log_sse_clients": log_stream_client_count(),
+        **counts,
+        "log_sse_clients": log_stream_client_count(user_id=user_id),
     }
 
 
@@ -528,13 +599,21 @@ def connection_status():
 # ════════════════════════════════════════════
 
 @router.get("/agent/briefing", summary="智能体巡检简报")
-def agent_briefing(db: Session = Depends(get_db)):
+def agent_briefing(
+    db: Session = Depends(get_db),
+    user=Depends(_get_monitor_user),
+):
     """返回告警智能体当前感知到的系统全貌，供前端主动播报与巡检展示。"""
     from datetime import timedelta
 
-    stats = alert_agent.get_stats(db)
+    user_id = _scope_user_id(user)
+    stats = alert_agent.get_stats(db, user_id=user_id)
     cutoff = datetime.utcnow() - timedelta(hours=24)
-    log_rows = db.query(SystemLog).filter(SystemLog.created_at >= cutoff).all()
+    log_rows = (
+        db.query(SystemLog)
+        .filter(SystemLog.created_at >= cutoff, SystemLog.user_id == user_id)
+        .all()
+    )
 
     by_category: dict[str, int] = {}
     by_level: dict[str, int] = {}
@@ -544,6 +623,7 @@ def agent_briefing(db: Session = Depends(get_db)):
 
     recent_alerts = (
         db.query(AlertEvent)
+        .filter(AlertEvent.user_id == user_id)
         .order_by(AlertEvent.created_at.desc())
         .limit(5)
         .all()
@@ -618,7 +698,7 @@ def agent_briefing(db: Session = Depends(get_db)):
             for a in recent_alerts
         ],
         "token_usage": stats.get("token_usage", {}),
-        "recent_agent_logs": alert_agent.get_recent_agent_logs(db, limit=8),
+        "recent_agent_logs": alert_agent.get_recent_agent_logs(db, limit=8, user_id=user_id),
         "monitoring": True,
         "timestamp": localize_utc(datetime.utcnow()),
     }
@@ -629,8 +709,13 @@ def agent_briefing(db: Session = Depends(get_db)):
 # ════════════════════════════════════════════
 
 @router.post("/assistant", summary="告警智能助手问答")
-async def assistant_chat(payload: AssistantQuery, db: Session = Depends(get_db)):
+async def assistant_chat(
+    payload: AssistantQuery,
+    db: Session = Depends(get_db),
+    user=Depends(_get_monitor_user),
+):
     """告警智能助手：基于异常上下文与实时感知状态回答自然语言问题。"""
+    user_id = _scope_user_id(user)
     context: dict[str, Any] = {
         "event_type": payload.event_type or "unknown",
         "path": payload.path or "",
@@ -638,34 +723,39 @@ async def assistant_chat(payload: AssistantQuery, db: Session = Depends(get_db))
     }
 
     if payload.alert_id:
-        alert = db.query(AlertEvent).filter(AlertEvent.id == payload.alert_id).first()
-        if alert:
-            context.update({
-                "event_type": alert.event_type,
-                "event_type_user": event_type_to_user(alert.event_type),
-                "title": alert.title,
-                "summary": alert.summary,
-                "root_cause": alert.root_cause,
-                "suggestion": alert.suggestion,
-                "level": alert.level,
-                "alert_id": alert.id,
-                "status": alert.status,
-            })
-            if alert.detail_json:
-                try:
-                    context["detail"] = json.loads(alert.detail_json)
-                except Exception:
-                    context["detail"] = {"raw": alert.detail_json}
-            replay = alert_agent.get_event_replay(db, alert.id)
-            if replay:
-                context["cause_analysis"] = replay.get("cause_analysis")
-                context["related_logs_count"] = len(replay.get("related_logs") or [])
+        alert = (
+            db.query(AlertEvent)
+            .filter(AlertEvent.id == payload.alert_id, AlertEvent.user_id == user_id)
+            .first()
+        )
+        if not alert:
+            raise HTTPException(404, "告警不存在")
+        context.update({
+            "event_type": alert.event_type,
+            "event_type_user": event_type_to_user(alert.event_type),
+            "title": alert.title,
+            "summary": alert.summary,
+            "root_cause": alert.root_cause,
+            "suggestion": alert.suggestion,
+            "level": alert.level,
+            "alert_id": alert.id,
+            "status": alert.status,
+        })
+        if alert.detail_json:
+            try:
+                context["detail"] = json.loads(alert.detail_json)
+            except Exception:
+                context["detail"] = {"raw": alert.detail_json}
+        replay = alert_agent.get_event_replay(db, alert.id, user_id=user_id)
+        if replay:
+            context["cause_analysis"] = replay.get("cause_analysis")
+            context["related_logs_count"] = len(replay.get("related_logs") or [])
     elif payload.event_type and payload.event_type not in ("unknown", "未知异常"):
         context["event_type_user"] = event_type_to_user(payload.event_type)
 
     # 注入实时感知快照与系统概况
-    context["perception"] = alert_agent.get_perception_snapshot()
-    stats = alert_agent.get_stats(db)
+    context["perception"] = alert_agent.get_perception_snapshot(user_id=user_id)
+    stats = alert_agent.get_stats(db, user_id=user_id)
     context["system_status"] = {
         "open_alerts": stats.get("open", 0),
         "open_critical": stats.get("open_critical", 0),
@@ -678,7 +768,7 @@ async def assistant_chat(payload: AssistantQuery, db: Session = Depends(get_db))
         k in (payload.question or "")
         for k in ("综合驾驶", "融合建议", "三路感知", "怎么开", "前方交警")
     ):
-        context["driving_advice"] = await scenario_fusion_service.get_driving_advice()
+        context["driving_advice"] = await scenario_fusion_service.get_driving_advice(user_id=user_id)
     has_alert_context = bool(
         payload.alert_id
         and context.get("title")
@@ -694,7 +784,7 @@ async def assistant_chat(payload: AssistantQuery, db: Session = Depends(get_db))
     if needs_alert_context(payload.question, intent) and not has_alert_context:
         open_rows = (
             db.query(AlertEvent)
-            .filter(AlertEvent.status == "open")
+            .filter(AlertEvent.status == "open", AlertEvent.user_id == user_id)
             .order_by(AlertEvent.created_at.desc())
             .limit(10)
             .all()
@@ -712,6 +802,7 @@ async def assistant_chat(payload: AssistantQuery, db: Session = Depends(get_db))
         context,
         intent=intent,
         history=[{"role": h.role, "content": h.content} for h in (payload.history or [])],
+        user_id=user_id,
     )
     ai_mode = getattr(llm_service, "last_assistant_mode", "template")
     ai_reason = getattr(llm_service, "last_assistant_reason", "")
@@ -769,17 +860,18 @@ def get_alert_config():
 
 
 @router.post("/llm/test", summary="测试 LLM API 连接")
-async def test_llm_connection():
+async def test_llm_connection(user=Depends(_get_monitor_user)):
     """测试大语言模型 API 是否可用。配置 LLM_API_KEY 后调用此接口验证。"""
-    return await llm_service.test_connection()
+    return await llm_service.test_connection(user_id=_scope_user_id(user))
 
 
 @router.post("/notifications/test", summary="测试通知渠道")
 async def test_notifications(
     channel: str = Query("all", description="web / webhook / email / all"),
+    user=Depends(_get_monitor_user),
 ):
     """向 Web / SSE / Webhook / 邮件发送测试消息，验证通知渠道配置。"""
     allowed = {"web", "webhook", "email", "all"}
     if channel not in allowed:
         raise HTTPException(400, f"不支持的渠道: {channel}，可选: {', '.join(sorted(allowed))}")
-    return await alert_agent.send_test_notification(channel)
+    return await alert_agent.send_test_notification(channel, user_id=_scope_user_id(user))

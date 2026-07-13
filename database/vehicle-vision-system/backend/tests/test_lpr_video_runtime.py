@@ -117,6 +117,72 @@ def test_rtsp_start_does_not_require_external_ffmpeg(monkeypatch):
     assert fake_hub.urls == ["rtsp://example/live"]
 
 
+def test_rtsp_jobs_preview_and_stop_are_scoped_by_user(monkeypatch):
+    class FakeSubscription:
+        def __init__(self):
+            self.closed = False
+
+        def wait_until_ready(self, timeout):
+            return StreamInfo(width=640, height=360, fps=15.0)
+
+        def close(self):
+            self.closed = True
+
+    class FakeHub:
+        def __init__(self):
+            self.subscriptions = []
+
+        def subscribe(self, _url):
+            subscription = FakeSubscription()
+            self.subscriptions.append(subscription)
+            return subscription
+
+    class FakeThread:
+        def __init__(self, target, daemon):
+            self.target = target
+            self.daemon = daemon
+
+        def start(self):
+            return None
+
+        def join(self, timeout=None):
+            return None
+
+    service = LprVideoService()
+    service._runtime = object()
+    service._error = None
+    fake_hub = FakeHub()
+    monkeypatch.setattr(lpr_video_service_module, "network_stream_hub", fake_hub)
+    monkeypatch.setattr("app.services.lpr_video_service.threading.Thread", FakeThread)
+
+    service.start_rtsp_stream(
+        "rtsp://camera.local/live",
+        source_name="live1",
+        user_id=101,
+    )
+    service.start_rtsp_stream(
+        "rtsp://camera.local/live",
+        source_name="live1",
+        user_id=202,
+    )
+
+    assert service.preview_status("live1", user_id=101)["found"] is True
+    assert service.preview_status("live1", user_id=202)["found"] is True
+    assert service.preview_status("live1", user_id=None)["found"] is False
+
+    stopped = service.stop_rtsp_stream(
+        rtsp_url="rtsp://camera.local/live",
+        source_name="live1",
+        user_id=101,
+    )
+
+    assert stopped["stopped"] is True
+    assert fake_hub.subscriptions[0].closed is True
+    assert fake_hub.subscriptions[1].closed is False
+    assert service.preview_status("live1", user_id=101)["running"] is False
+    assert service.preview_status("live1", user_id=202)["running"] is True
+
+
 def test_lpr_rtsp_shares_capture_and_stop_releases_only_lpr_subscription(monkeypatch):
     class SharedCapture:
         def __init__(self):

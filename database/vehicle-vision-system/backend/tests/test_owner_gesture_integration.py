@@ -261,6 +261,29 @@ def test_low_confidence_confirm_is_deferred_and_can_be_accepted():
     assert not service.has_pending_confirm()
 
 
+def test_pending_confirmation_is_isolated_between_users_and_shared_for_guests():
+    service = _service_without_models()
+    service._maybe_defer_for_confirmation(
+        "fist", 0.8, "confirm", context_id=101,
+    )
+    service._maybe_defer_for_confirmation(
+        "thumb_up", 0.8, "confirm", context_id=202,
+    )
+    service._maybe_defer_for_confirmation(
+        "thumb_down", 0.8, "confirm", context_id=None,
+    )
+
+    assert service.has_pending_confirm(context_id=101)
+    assert service.has_pending_confirm(context_id=202)
+    assert service.has_pending_confirm(context_id=None)
+    assert service.confirm_pending(True, context_id=303) is None
+
+    assert service.confirm_pending(True, context_id=202)["gesture"] == "thumb_up"
+    assert service.has_pending_confirm(context_id=101)
+    assert service.confirm_pending(True, context_id=None)["gesture"] == "thumb_down"
+    assert service.confirm_pending(True, context_id=101)["gesture"] == "fist"
+
+
 def test_realtime_gesture_requires_stable_candidate_and_bridges_short_gap():
     service = _service_without_models()
     service._realtime_candidate_gesture = "no_gesture"

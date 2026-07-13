@@ -140,6 +140,88 @@ def _migrate_schema() -> None:
                 logger.warning("Could not add column %s.%s: %s", table.name, col.name, exc)
 
 
+def _ensure_user_scope_indexes() -> None:
+    """为按用户隔离的高频查询补充幂等复合索引。"""
+    index_specs = {
+        "license_plate_records": [
+            ("ix_lpr_records_user_created", ("user_id", "created_at")),
+        ],
+        "police_gesture_records": [
+            ("ix_police_records_user_created", ("user_id", "created_at")),
+        ],
+        "owner_gesture_records": [
+            ("ix_owner_records_user_created", ("user_id", "created_at")),
+        ],
+        "vehicle_state": [
+            ("ix_vehicle_state_user", ("user_id",)),
+        ],
+        "system_logs": [
+            ("ix_system_logs_user_created", ("user_id", "created_at")),
+        ],
+        "alert_events": [
+            ("ix_alert_events_user_created", ("user_id", "created_at")),
+            ("ix_alert_events_user_status_created", ("user_id", "status", "created_at")),
+        ],
+        "scenario_conflicts": [
+            ("ix_scenario_conflicts_user_created", ("user_id", "created_at")),
+        ],
+    }
+
+    insp = inspect(engine)
+    dialect = engine.dialect.name
+    table_names = set(insp.get_table_names())
+    for table_name, specs in index_specs.items():
+        if table_name not in table_names:
+            continue
+        columns = {col["name"] for col in insp.get_columns(table_name)}
+        existing = {index["name"].lower() for index in insp.get_indexes(table_name)}
+        for index_name, index_columns in specs:
+            if index_name.lower() in existing or not set(index_columns).issubset(columns):
+                continue
+            if dialect == "mssql":
+                table_sql = f"[{table_name}]"
+                columns_sql = ", ".join(f"[{name}]" for name in index_columns)
+                statement = f"CREATE INDEX [{index_name}] ON {table_sql} ({columns_sql})"
+            else:
+                table_sql = table_name
+                columns_sql = ", ".join(index_columns)
+                prefix = "CREATE INDEX IF NOT EXISTS" if dialect == "sqlite" else "CREATE INDEX"
+                statement = f"{prefix} {index_name} ON {table_sql} ({columns_sql})"
+            try:
+                with engine.begin() as conn:
+                    conn.execute(text(statement))
+                existing.add(index_name.lower())
+                logger.info("Created user-scope index %s on %s", index_name, table_name)
+            except Exception as exc:
+                logger.warning("Could not create index %s on %s: %s", index_name, table_name, exc)
+
+
+def _verify_user_scope_schema() -> None:
+    """Fail startup when a required isolation column could not be installed."""
+    required_columns = {
+        "license_plate_records": "user_id",
+        "police_gesture_records": "user_id",
+        "owner_gesture_records": "user_id",
+        "vehicle_state": "user_id",
+        "system_logs": "user_id",
+        "alert_events": "user_id",
+        "scenario_conflicts": "user_id",
+    }
+    insp = inspect(engine)
+    table_names = set(insp.get_table_names())
+    missing: list[str] = []
+    for table_name, column_name in required_columns.items():
+        if table_name not in table_names:
+            missing.append(f"{table_name}.{column_name} (table missing)")
+            continue
+        columns = {column["name"] for column in insp.get_columns(table_name)}
+        if column_name not in columns:
+            missing.append(f"{table_name}.{column_name}")
+    if missing:
+        joined = ", ".join(missing)
+        raise RuntimeError(f"User isolation schema is incomplete: {joined}")
+
+
 def check_db_connection() -> bool:
     """检测数据库连接是否可用"""
     db = SessionLocal()
@@ -157,3 +239,5 @@ def init_db():
 
     Base.metadata.create_all(bind=engine)
     _migrate_schema()
+    _verify_user_scope_schema()
+    _ensure_user_scope_indexes()

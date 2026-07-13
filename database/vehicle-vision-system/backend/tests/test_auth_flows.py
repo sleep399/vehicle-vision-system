@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from fastapi.testclient import TestClient
 from fastapi import FastAPI
 from app.database import SessionLocal, engine, init_db
+from app.models.logs import SystemLog
 from app.models.user import User, VerificationCode
 from app.routers.auth import router as auth_router
 from app.services.auth_email import EmailDeliveryError, send_verification_email
@@ -71,6 +72,17 @@ class AuthenticationFlowTests(unittest.TestCase):
             self.assertNotEqual(stored_user.email, "password@example.com")
             self.assertNotIn("password@example.com", stored_user.email_encrypted)
             self.assertTrue(stored_user.email_encrypted.startswith(ENCRYPTED_PREFIX))
+            registration_log = db.query(SystemLog).order_by(SystemLog.id.desc()).first()
+            self.assertEqual(registration_log.user_id, stored_user.id)
+
+        failed_login = self.client.post(
+            "/api/auth/login",
+            json={"username": "password_user", "password": "wrong-password"},
+        )
+        self.assertEqual(failed_login.status_code, 401)
+        with SessionLocal() as db:
+            failed_login_log = db.query(SystemLog).order_by(SystemLog.id.desc()).first()
+            self.assertEqual(failed_login_log.user_id, stored_user.id)
 
         logged_in = self.client.post(
             "/api/auth/login",

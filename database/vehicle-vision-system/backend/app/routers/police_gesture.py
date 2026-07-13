@@ -112,7 +112,9 @@ def history(
 ):
     q = db.query(PoliceGestureRecord).order_by(PoliceGestureRecord.created_at.desc())
     if user:
-        q = q.filter((PoliceGestureRecord.user_id == user.id) | (PoliceGestureRecord.user_id.is_(None)))
+        q = q.filter(PoliceGestureRecord.user_id == user.id)
+    else:
+        q = q.filter(PoliceGestureRecord.user_id.is_(None))
     records = q.offset(skip).limit(limit).all()
     return [
         {

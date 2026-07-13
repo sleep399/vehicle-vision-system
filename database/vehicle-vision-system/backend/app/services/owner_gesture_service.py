@@ -199,30 +199,74 @@ class OwnerGestureService:
         self._realtime_confirmed_confidence: float = 0.0
         self._realtime_confirmed_at: float = 0.0
         self._wake_lock_until: float = 0.0
-        # 等待用户二次确认的挂起动作 (低置信度 confirm 流程)
-        self._pending_confirm: dict | None = None
+        # 等待用户二次确认的挂起动作。None 是所有游客共享的作用域，
+        # 登录账号则使用各自的 user_id，防止一个账号确认另一个账号的动作。
+        self._pending_confirms: dict[int | None, dict] = {}
         # 运行时轨迹/去抖状态保存在服务实例内，因此同一进程只允许一个
         # 实时车主流，防止不同摄像头或用户的帧串成同一手势。
         self._realtime_session_guard = threading.Lock()
         self._active_realtime_session: str | None = None
+        self._active_realtime_context_id: int | None = None
 
-    def acquire_realtime_session(self, session_id: str) -> bool:
+    @property
+    def _pending_confirm(self) -> dict | None:
+        """Backward-compatible guest pending slot used by older callers/tests."""
+        return getattr(self, "_pending_confirms", {}).get(None)
+
+    @_pending_confirm.setter
+    def _pending_confirm(self, pending: dict | None) -> None:
+        pending_by_user = getattr(self, "_pending_confirms", None)
+        if pending_by_user is None:
+            pending_by_user = {}
+            self._pending_confirms = pending_by_user
+        if pending is None:
+            pending_by_user.pop(None, None)
+        else:
+            pending_by_user[None] = pending
+
+    def _pending_for(self, context_id: int | None) -> dict | None:
+        return getattr(self, "_pending_confirms", {}).get(context_id)
+
+    def _set_pending_for(self, context_id: int | None, pending: dict | None) -> None:
+        pending_by_user = getattr(self, "_pending_confirms", None)
+        if pending_by_user is None:
+            pending_by_user = {}
+            self._pending_confirms = pending_by_user
+        if pending is None:
+            pending_by_user.pop(context_id, None)
+        else:
+            pending_by_user[context_id] = pending
+
+    def acquire_realtime_session(
+        self,
+        session_id: str,
+        context_id: int | None = None,
+    ) -> bool:
         with self._realtime_session_guard:
             if self._active_realtime_session not in (None, session_id):
                 return False
             if self._active_realtime_session is None:
-                self._reset_runtime_state(clear_confirmation=True)
+                self._reset_runtime_state(clear_confirmation=True, context_id=context_id)
                 self._active_realtime_session = session_id
+                self._active_realtime_context_id = context_id
             return True
 
     def release_realtime_session(self, session_id: str) -> None:
         with self._realtime_session_guard:
             if self._active_realtime_session != session_id:
                 return
-            self._reset_runtime_state(clear_confirmation=True)
+            self._reset_runtime_state(
+                clear_confirmation=True,
+                context_id=self._active_realtime_context_id,
+            )
             self._active_realtime_session = None
+            self._active_realtime_context_id = None
 
-    def _reset_runtime_state(self, clear_confirmation: bool = True) -> None:
+    def _reset_runtime_state(
+        self,
+        clear_confirmation: bool = True,
+        context_id: int | None = None,
+    ) -> None:
         self._position_history.clear()
         self._hand_center_history.clear()
         self._circle_points.clear()
@@ -247,7 +291,7 @@ class OwnerGestureService:
         self._realtime_confirmed_at = 0.0
         self._wake_lock_until = 0.0
         if clear_confirmation:
-            self._pending_confirm = None
+            self._set_pending_for(context_id, None)
 
     # ---------------------- 基础几何 ----------------------
     @staticmethod
@@ -1399,10 +1443,14 @@ class OwnerGestureService:
         return []
 
     # ---------------------- 确认流程 ----------------------
-    def confirm_pending(self, accept: bool) -> dict | None:
+    def confirm_pending(
+        self,
+        accept: bool,
+        context_id: int | None = None,
+    ) -> dict | None:
         """用户对低置信度动作做出确认/取消。返回确认后的动作信息或 None。"""
-        pending = self._pending_confirm
-        self._pending_confirm = None
+        pending = self._pending_for(context_id)
+        self._set_pending_for(context_id, None)
         if not pending:
             return None
         if accept:
@@ -1411,8 +1459,8 @@ class OwnerGestureService:
             return pending
         return None
 
-    def has_pending_confirm(self) -> bool:
-        return self._pending_confirm is not None
+    def has_pending_confirm(self, context_id: int | None = None) -> bool:
+        return self._pending_for(context_id) is not None
 
     # ---------------------- 主入口 ----------------------
     def recognize(
@@ -1423,6 +1471,7 @@ class OwnerGestureService:
         vehicle_state: dict | None = None,
         respect_standby: bool = False,
         realtime_mode: bool = False,
+        context_id: int | None = None,
     ) -> dict[str, Any]:
         image = self._detect_best_frame(image_bytes)
         h, w = image.shape[:2]
@@ -1459,7 +1508,7 @@ class OwnerGestureService:
             self._session_awake = False
         elif vehicle_state.get("is_awake"):
             self._session_awake = True
-        confirm_mode = self._pending_confirm is not None
+        confirm_mode = self.has_pending_confirm(context_id)
 
         if detected_hands:
             self._last_hand_seen_time = time.time()
@@ -1590,13 +1639,13 @@ class OwnerGestureService:
             ]
 
             if action == "confirm_pending_accept":
-                pending = self.confirm_pending(True)
+                pending = self.confirm_pending(True, context_id=context_id)
                 action = pending["action"] if pending else None
                 confirmation_resolved = True
                 confirmation_accepted = True
                 needs_confirmation = False
             elif action == "confirm_pending_cancel":
-                self.confirm_pending(False)
+                self.confirm_pending(False, context_id=context_id)
                 action = None
                 confirmation_resolved = True
                 confirmation_accepted = False
@@ -1607,13 +1656,13 @@ class OwnerGestureService:
                 if debounced_gesture != "no_gesture":
                     gesture, confidence = debounced_gesture, debounced_confidence
                     action, needs_confirmation = self._maybe_defer_for_confirmation(
-                        gesture, confidence, action)
+                        gesture, confidence, action, context_id=context_id)
                 else:
                     gesture, confidence = raw_gesture, raw_confidence
             else:
                 _, _, action = OWNER_GESTURES.get(gesture, OWNER_GESTURES["no_gesture"])
                 action, needs_confirmation = self._maybe_defer_for_confirmation(
-                    gesture, confidence, action)
+                    gesture, confidence, action, context_id=context_id)
 
             action, needs_confirmation, blocked_action = self._gate_action_for_standby(
                 action,
@@ -1621,6 +1670,7 @@ class OwnerGestureService:
                 vehicle_state,
                 respect_standby=respect_standby,
                 confirm_mode=confirm_mode,
+                context_id=context_id,
             )
             if blocked_action:
                 debug_info["blocked_action_in_standby"] = blocked_action
@@ -1682,16 +1732,22 @@ class OwnerGestureService:
             "success": action is not None or gesture != "no_gesture",
         }
 
-    def _maybe_defer_for_confirmation(self, gesture: str, confidence: float, action: str | None):
+    def _maybe_defer_for_confirmation(
+        self,
+        gesture: str,
+        confidence: float,
+        action: str | None,
+        context_id: int | None = None,
+    ):
         """低置信度且需确认的动作: 暂不执行, 挂起等待用户确认。返回 (生效动作, 是否需确认)。"""
         if action in CONFIRM_REQUIRED_ACTIONS and confidence < CONFIRM_CONFIDENCE_THRESHOLD:
             _, gesture_cn, _ = OWNER_GESTURES.get(gesture, OWNER_GESTURES["no_gesture"])
-            self._pending_confirm = {
+            self._set_pending_for(context_id, {
                 "gesture": gesture,
                 "gesture_cn": gesture_cn,
                 "confidence": float(confidence),
                 "action": action,
-            }
+            })
             return None, True
         return action, False
 
@@ -1703,14 +1759,12 @@ class OwnerGestureService:
         *,
         respect_standby: bool,
         confirm_mode: bool,
+        context_id: int | None = None,
     ) -> tuple[str | None, bool, str | None]:
         """休眠时保留电话快捷动作，只拦截需要先唤醒界面的控车动作。"""
         blocked_action = None
-        pending_action = (
-            self._pending_confirm.get("action")
-            if needs_confirmation and self._pending_confirm
-            else None
-        )
+        pending = self._pending_for(context_id)
+        pending_action = pending.get("action") if needs_confirmation and pending else None
         candidate_action = action or pending_action
         if (
             respect_standby
@@ -1723,7 +1777,7 @@ class OwnerGestureService:
             action = None
             needs_confirmation = False
             if pending_action:
-                self._pending_confirm = None
+                self._set_pending_for(context_id, None)
         return action, needs_confirmation, blocked_action
 
     def _annotate(self, annotated, en, confidence, action, needs_confirmation):
@@ -1752,6 +1806,7 @@ class OwnerGestureService:
         vehicle_state: dict | None = None,
         respect_standby: bool = False,
         realtime_mode: bool = False,
+        context_id: int | None = None,
     ) -> dict[str, Any]:
         _, buf = cv2.imencode(".jpg", frame)
         return self.recognize(
@@ -1760,6 +1815,7 @@ class OwnerGestureService:
             vehicle_state=vehicle_state,
             respect_standby=respect_standby,
             realtime_mode=realtime_mode,
+            context_id=context_id,
         )
 
     @staticmethod
@@ -1920,6 +1976,7 @@ class OwnerGestureService:
         sample_interval: int = 1,
         vehicle_state: dict | None = None,
         respect_standby: bool = False,
+        context_id: int | None = None,
     ) -> dict[str, Any]:
         cap = cv2.VideoCapture(str(video_path))
         results: list[dict[str, Any]] = []
@@ -1935,7 +1992,7 @@ class OwnerGestureService:
         })
         local_state = dict(initial_state)
 
-        self._reset_runtime_state()
+        self._reset_runtime_state(context_id=context_id)
         try:
             while cap.isOpened():
                 ret, frame = cap.read()
@@ -1947,6 +2004,7 @@ class OwnerGestureService:
                         frame,
                         vehicle_state=local_state,
                         respect_standby=respect_standby,
+                        context_id=context_id,
                     )
                     last_result = result
                     if result.get("action"):
@@ -1961,7 +2019,7 @@ class OwnerGestureService:
                 frame_index += 1
         finally:
             cap.release()
-            self._reset_runtime_state()
+            self._reset_runtime_state(context_id=context_id)
 
         best_result = self._select_video_best_result(results)
         final_state = dict(local_state)
@@ -1974,6 +2032,7 @@ class OwnerGestureService:
                 initial_state,
                 respect_standby=respect_standby,
                 confirm_mode=False,
+                context_id=context_id,
             )
             if blocked_action:
                 best_result = dict(best_result)

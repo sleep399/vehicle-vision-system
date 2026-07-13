@@ -126,7 +126,7 @@ def test_monitoring_frontend_exposes_structured_alerts_and_chinese_logs():
     js += (BACKEND_DIR / "static" / "js" / "monitoring-workbench.js").read_text(encoding="utf-8")
     assert 'id="assistant-context-bar"' in html
     assert 'id="test-alert-type"' in html
-    assert 'monitoring-workbench.js?v=20260713-ownerfix1' in html
+    assert 'monitoring-workbench.js?v=20260713-user-scope1' in html
     assert '<option value="警告">警告</option>' in html
     assert "severity_assessment" in js
     assert "focusedAlertId" in js
@@ -195,7 +195,8 @@ def test_alert_center_mirrors_original_module_runtime_without_second_capture_pat
     assert "publishRecognitionResult?.('police', row" in app
     assert "publishRecognitionResult?.('lpr', data" in app
     assert "publishOwnerVehicleState?.(this.ownerVehicleState)" in app
-    assert "module === 'owner' && this.token" in app
+    assert "const tokenQuery = this.token ?" in app
+    assert "/ws/stream/${module}${tokenQuery}" in app
     stop_lpr = app[app.index("async stopVideoStream()") : app.index("stopStream(module)")]
     assert "this.stopStream(" not in stop_lpr
     assert "jointRecognition" not in app
@@ -226,7 +227,7 @@ def test_alert_center_has_dedicated_log_stream_for_live_scenario_updates():
     assert "alertScenarioLogSse: null" in app
     assert "connectAlertScenarioLogStream" in app
     assert "disconnectAlertScenarioLogStream" in app
-    assert "new EventSource(this.apiUrl('/api/monitor/logs/stream'))" in workbench
+    assert "new EventSource(this.monitorStreamUrl('/api/monitor/logs/stream'))" in workbench
     assert "['lpr', 'police_gesture', 'owner_gesture'].includes(category)" in workbench
     assert "scheduleScenarioFusionRefresh(550)" in workbench
     assert "this.alertScenarioLogSse" in workbench

@@ -74,8 +74,8 @@ async def record_lpr_recognition(
         message = f"[{source}] 未识别到有效车牌"
 
     write_log(db, "lpr", message, level=level, detail=detail, user_id=user_id)
-    alert_agent.record_lpr_result(success)
-    await alert_agent.check_and_alert(db, "lpr")
+    alert_agent.record_lpr_result(success, user_id=user_id)
+    await alert_agent.check_and_alert(db, "lpr", user_id=user_id)
     await _observe_scenario(scenario_fusion_service.ingest_lpr(
         db,
         success=success,
@@ -84,6 +84,7 @@ async def record_lpr_recognition(
         source=source,
         source_id=source_id,
         evaluate_conflicts=False,
+        user_id=user_id,
     ))
 
 
@@ -116,15 +117,15 @@ async def record_police_recognition(
     if error:
         level = "ERROR"
         message = f"[{source}] 识别失败: {humanize_error_text(error)}"
-        alert_agent.record_gesture_failure("police")
+        alert_agent.record_gesture_failure("police", user_id=user_id)
     else:
         label = gesture_cn or "无手势"
         level = "WARN" if confidence < 0.4 else "INFO"
         message = f"[{source}] 识别手势: {label} ({confidence:.0%})"
-        alert_agent.record_gesture_confidence("police", confidence)
+        alert_agent.record_gesture_confidence("police", confidence, user_id=user_id)
 
     write_log(db, "police_gesture", message, level=level, detail=detail, user_id=user_id)
-    await alert_agent.check_and_alert(db, "police")
+    await alert_agent.check_and_alert(db, "police", user_id=user_id)
     if gesture and not error:
         await _observe_scenario(scenario_fusion_service.ingest_police(
             db,
@@ -134,6 +135,7 @@ async def record_police_recognition(
             source=source,
             source_id=source_id,
             evaluate_conflicts=False,
+            user_id=user_id,
         ))
 
 
@@ -176,26 +178,26 @@ async def record_owner_recognition(
     if error:
         level = "ERROR"
         message = f"[{source}] 识别失败: {humanize_error_text(error)}"
-        alert_agent.record_gesture_failure("owner")
+        alert_agent.record_gesture_failure("owner", user_id=user_id)
     elif needs_confirmation:
         level = "WARN"
         message = f"[{source}] 待确认低置信度手势: {gesture_cn or '未知'} ({confidence:.0%})"
-        alert_agent.record_gesture_confidence("owner", confidence)
+        alert_agent.record_gesture_confidence("owner", confidence, user_id=user_id)
     elif action:
         level = "INFO"
         message = f"[{source}] 手势触发: {gesture_cn or gesture or '未知'} -> {action}"
-        alert_agent.record_gesture_confidence("owner", confidence)
+        alert_agent.record_gesture_confidence("owner", confidence, user_id=user_id)
     elif gesture in (None, "no_gesture") or confidence < 0.35:
         level = "WARN"
         message = f"[{source}] 未识别到有效手势"
-        alert_agent.record_gesture_confidence("owner", confidence)
+        alert_agent.record_gesture_confidence("owner", confidence, user_id=user_id)
     else:
         level = "INFO"
         message = f"[{source}] 识别手势: {gesture_cn or '未知'} ({confidence:.0%})"
-        alert_agent.record_gesture_confidence("owner", confidence)
+        alert_agent.record_gesture_confidence("owner", confidence, user_id=user_id)
 
     write_log(db, "owner_gesture", message, level=level, detail=detail, user_id=user_id)
-    await alert_agent.check_and_alert(db, "owner")
+    await alert_agent.check_and_alert(db, "owner", user_id=user_id)
     if not error and (action or (gesture and gesture != "no_gesture")):
         await _observe_scenario(scenario_fusion_service.ingest_owner(
             db,
@@ -206,6 +208,7 @@ async def record_owner_recognition(
             source=source,
             source_id=source_id,
             evaluate_conflicts=False,
+            user_id=user_id,
         ))
 
 

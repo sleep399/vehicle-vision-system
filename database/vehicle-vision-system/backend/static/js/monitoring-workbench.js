@@ -256,9 +256,16 @@
 
 
   // ── WebSocket & SSE ──
+  monitorStreamUrl(path) {
+    const url = new URL(this.apiUrl(path));
+    if (this.token) url.searchParams.set('token', this.token);
+    return url.toString();
+  },
+
   connectAlertWs() {
     if (this.wsAlerts && this.wsAlerts.readyState === WebSocket.OPEN) return;
-    this.wsAlerts = new WebSocket(`${this.wsBase()}/ws/alerts`);
+    const tokenQuery = this.token ? `?token=${encodeURIComponent(this.token)}` : '';
+    this.wsAlerts = new WebSocket(`${this.wsBase()}/ws/alerts${tokenQuery}`);
     this.wsAlerts.onmessage = (e) => {
       const data = JSON.parse(e.data);
       if (data.type === 'alert') {
@@ -277,7 +284,7 @@
 
   connectSSE() {
     if (this.sseSource) return;
-    this.sseSource = new EventSource(this.apiUrl('/api/monitor/stream'));
+    this.sseSource = new EventSource(this.monitorStreamUrl('/api/monitor/stream'));
     this.sseSource.onopen = () => {
       document.getElementById('stat-sse-conn') && (document.getElementById('stat-sse-conn').textContent = '1');
     };
@@ -950,8 +957,8 @@
   },
 
   resetLogFilters(reload = true) {
-    const ids = ['log-category', 'log-level', 'log-search', 'log-user', 'log-start', 'log-end'];
-    const defaults = { 'log-category': '', 'log-level': '', 'log-search': '', 'log-user': '', 'log-start': '', 'log-end': '' };
+    const ids = ['log-category', 'log-level', 'log-search', 'log-start', 'log-end'];
+    const defaults = { 'log-category': '', 'log-level': '', 'log-search': '', 'log-start': '', 'log-end': '' };
     ids.forEach(id => {
       const el = document.getElementById(id);
       if (el) el.value = defaults[id] ?? '';
@@ -1153,7 +1160,6 @@
       cat: (document.getElementById('log-category') && document.getElementById('log-category').value) || '',
       level: (document.getElementById('log-level') && document.getElementById('log-level').value) || '',
       search: (document.getElementById('log-search') && document.getElementById('log-search').value) || '',
-      userId: (document.getElementById('log-user') && document.getElementById('log-user').value) || '',
       start: (document.getElementById('log-start') && document.getElementById('log-start').value) || '',
       end: (document.getElementById('log-end') && document.getElementById('log-end').value) || '',
     };
@@ -1163,7 +1169,6 @@
     if (!log) return false;
     if (filters.cat && log.category !== filters.cat) return false;
     if (filters.level && !this.logLevelMatchesFilter(log.level, filters.level)) return false;
-    if (filters.userId && String(log.user_id || '') !== String(filters.userId)) return false;
     if (filters.search) {
       const q = filters.search.toLowerCase();
       const msg = String(log.message || '').toLowerCase();
@@ -1289,7 +1294,7 @@
     if (this.logSseSource) return;
     const statusEl = document.getElementById('log-stream-status');
     const btn = document.getElementById('log-stream-btn');
-    this.logSseSource = new EventSource(this.apiUrl('/api/monitor/logs/stream'));
+    this.logSseSource = new EventSource(this.monitorStreamUrl('/api/monitor/logs/stream'));
     this.logSseSource.onopen = () => {
       if (statusEl) { statusEl.textContent = '监听中'; statusEl.className = 'conn-status connected'; }
       if (btn) btn.textContent = '停止监听';
@@ -1329,7 +1334,6 @@
       if (filters.cat) url += '&category=' + filters.cat;
       if (filters.level) url += '&level=' + filters.level;
       if (filters.search) url += '&search=' + encodeURIComponent(filters.search);
-      if (filters.userId) url += '&user_id=' + filters.userId;
       if (filters.start) url += '&start=' + new Date(filters.start).toISOString();
       if (filters.end) url += '&end=' + new Date(filters.end).toISOString();
 
@@ -2403,7 +2407,7 @@
 
   connectAlertScenarioLogStream() {
     if (this.alertScenarioLogSse || !document.getElementById('view-alerts')) return;
-    const source = new EventSource(this.apiUrl('/api/monitor/logs/stream'));
+    const source = new EventSource(this.monitorStreamUrl('/api/monitor/logs/stream'));
     this.alertScenarioLogSse = source;
     source.onmessage = event => {
       let data;
