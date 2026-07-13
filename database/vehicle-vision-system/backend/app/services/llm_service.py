@@ -5,7 +5,6 @@ import re
 from datetime import datetime
 from typing import Any
 
-import httpx
 
 from app.config import settings, LLM_PROVIDER_PRESETS
 from app.database import SessionLocal
@@ -154,14 +153,20 @@ class LLMService:
         if json_mode:
             payload["response_format"] = {"type": "json_object"}
 
-        async with httpx.AsyncClient(timeout=settings.llm_timeout) as client:
-            resp = await client.post(
-                f"{settings.effective_llm_base}/chat/completions",
-                headers={"Authorization": f"Bearer {settings.llm_api_key}"},
-                json=payload,
-            )
-            resp.raise_for_status()
-            data = resp.json()
+        import urllib.request
+        import urllib.error
+
+        req = urllib.request.Request(
+            f"{settings.effective_llm_base}/chat/completions",
+            data=json.dumps(payload).encode('utf-8'),
+            headers={
+                "Authorization": f"Bearer {settings.llm_api_key}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=settings.llm_timeout) as resp:
+            data = json.loads(resp.read().decode('utf-8'))
 
         await self._track_llm_response(data)
         return data

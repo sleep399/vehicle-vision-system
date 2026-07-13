@@ -90,6 +90,11 @@ def get_pose_backend():
     return police_gesture_service.pose_backend_info()
 
 
+@router.get("/pose-backend/health", summary="检测交警姿态模型加载状态")
+def pose_backend_health():
+    return police_gesture_service.test_yolo_pose_model()
+
+
 @router.put("/pose-backend", summary="切换交警姿态识别后端")
 async def set_pose_backend(payload: dict):
     try:

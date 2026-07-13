@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,6 +22,8 @@ from model.LPRNet import build_lprnet
 from app.yolo_lprnet.charset import CHARS
 from app.utils.plate_color import resolve_plate_color
 from demo_integrated_lpr import greedy_decode
+
+PLATE_RE = re.compile(r"^[\u4e00-\u9fa5][A-Z][A-Z0-9]{5,6}$")
 
 
 @dataclass
@@ -74,6 +77,8 @@ class YoloLprRuntime:
         self.recognizer.load_state_dict(state)
         self.recognizer.to(self.config.device)
         self.recognizer.eval()
+        self.min_confidence = 0.35
+        self.min_plate_length = 4
 
     def recognize_plate(self, plate_image: np.ndarray) -> str:
         img = cv2.resize(plate_image, (94, 24))
@@ -89,6 +94,17 @@ class YoloLprRuntime:
             prebs = self.recognizer(img_tensor)
         return greedy_decode(prebs, CHARS)
 
+    def _is_likely_plate_text(self, text: str) -> bool:
+        if not text:
+            return False
+        if len(text) < self.min_plate_length:
+            return False
+        if PLATE_RE.match(text):
+            return True
+        if len(text) == 7 and text[0] in CHARS[:31] and text[1].isalpha():
+            return True
+        return False
+
     def process_frame(self, frame: np.ndarray) -> tuple[np.ndarray, list[dict[str, Any]]]:
         result_frame = frame.copy()
         plate_results: list[dict[str, Any]] = []
@@ -101,15 +117,18 @@ class YoloLprRuntime:
                 continue
             plate_image = frame[y1:y2, x1:x2]
             plate_text = self.recognize_plate(plate_image)
+            plate_text_clean = (plate_text or "").replace("无法识别", "").strip()
+            if not self._is_likely_plate_text(plate_text_clean):
+                continue
             plate_color = resolve_plate_color(frame, [x1, y1, x2, y2])
             plate_results.append({
                 "coords": (x1, y1, x2, y2),
                 "confidence": float(conf),
-                "text": plate_text,
+                "text": plate_text_clean,
                 "plate_color": plate_color,
             })
             cv2.rectangle(result_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-            label = f"{plate_text} ({plate_color})"
+            label = f"{plate_text_clean} ({plate_color})"
             try:
                 from PIL import Image, ImageDraw, ImageFont
                 pil = Image.fromarray(cv2.cvtColor(result_frame, cv2.COLOR_BGR2RGB))

@@ -1679,20 +1679,28 @@ const App = {
           this.lprVideoBusy = false;
           const data = msg.data || {};
           frameCount += 1;
-          debug('frame result', data.frame, data.plate_count, data.plates);
+          const rawPlates = Array.isArray(data.plates) ? data.plates : [];
+          const validPlates = rawPlates.filter((p) => {
+            const plate = (p.plate_number || p.text || '').replace(/无法识别/g, '').trim();
+            const hitCount = Number(p.hit_count || 0);
+            const maxConfidence = Number(p.max_confidence || p.confidence || 0);
+            return plate.length >= 4 && (hitCount >= 2 || maxConfidence >= 0.55);
+          });
+          const validCount = validPlates.length;
+          debug('frame result', data.frame, data.plate_count, data.plates, 'valid=', validCount);
           if (data.annotated_image && preview) preview.src = 'data:image/jpeg;base64,' + data.annotated_image;
-          const title = data.plate_count ? `✓ 检测到 ${data.plate_count} 个车牌` : '○ 未检测到车牌';
-          const subtitle = data.plates?.map(p => p.plate_number).filter(Boolean).join('、') || '等待下一帧';
+          const title = validCount ? `✓ 检测到 ${validCount} 个车牌` : '○ 未检测到车牌';
+          const subtitle = validPlates.map(p => (p.plate_number || p.text || '').trim()).filter(Boolean).join('、') || '等待下一帧';
           if (videoResult) {
-            videoResult.innerHTML = `<div class="result-banner ${data.plate_count ? 'success' : 'danger'}"><div class="result-title">${title}</div><div class="result-subtitle">${subtitle}</div><div class="result-subtitle">runtime_api / yolo_lprnet_assets · 帧 ${data.frame ?? frameCount}</div></div>`;
+            videoResult.innerHTML = `<div class="result-banner ${validCount ? 'success' : 'danger'}"><div class="result-title">${title}</div><div class="result-subtitle">${subtitle}</div><div class="result-subtitle">runtime_api / yolo_lprnet_assets · 帧 ${data.frame ?? frameCount}</div></div>`;
           }
           if (plateTarget) {
-            plateTarget.innerHTML = (data.plates || []).map(p => `<div class="plate-item"><span class="number">${this.formatPlateNumber(p.plate_number)}</span><span class="color ${this.plateColorClass(p.plate_color)}">${p.plate_color || '蓝牌'}</span><span class="history-meta" style="margin-left:.5rem">${((p.confidence || 0) * 100).toFixed(0)}%</span></div>`).join('') || '<p style="color:var(--text-muted)">未检测到车牌</p>';
+            plateTarget.innerHTML = validPlates.map(p => `<div class="plate-item"><span class="number">${this.formatPlateNumber(p.plate_number || p.text)}</span><span class="color ${this.plateColorClass(p.plate_color)}">${p.plate_color || '蓝牌'}</span><span class="history-meta" style="margin-left:.5rem">${((p.confidence || 0) * 100).toFixed(0)}%</span></div>`).join('') || '<p style="color:var(--text-muted)">未检测到车牌</p>';
           }
           if (progressFill) progressFill.style.width = Math.min(100, 5 + sentCount * 2) + '%';
           if (progressText) progressText.textContent = `实时识别中 · 已处理 ${frameCount} 帧`;
-          (data.plates || []).forEach(p => {
-            const plate = (p.plate_number || '').trim();
+          validPlates.forEach(p => {
+            const plate = (p.plate_number || p.text || '').trim();
             const conf = Number(p.confidence || 0);
             if (!plate || conf < 0.65) return;
             const key = `${plate}|${p.plate_color || '蓝牌'}`;

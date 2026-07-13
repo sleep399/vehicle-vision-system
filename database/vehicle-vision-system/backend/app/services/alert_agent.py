@@ -21,7 +21,6 @@ from datetime import datetime, timedelta, timezone
 from email.mime.text import MIMEText
 from typing import Any
 
-import httpx
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -887,9 +886,18 @@ class AlertAgent:
             platform = self._detect_webhook_platform(settings.webhook_url)
             body = self._build_webhook_payload(platform, payload)
 
-            async with httpx.AsyncClient(timeout=10) as client:
-                resp = await client.post(settings.webhook_url, json=body)
-                resp.raise_for_status()
+            import urllib.request
+            import urllib.error
+            import json as _json
+
+            req = urllib.request.Request(
+                settings.webhook_url,
+                data=_json.dumps(body).encode('utf-8'),
+                headers={'Content-Type': 'application/json'},
+                method='POST',
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                resp.read()
             self.record_webhook_result(True)
             return True
         except Exception as e:

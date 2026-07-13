@@ -115,7 +115,17 @@ async def ws_stream(websocket: WebSocket, module: str):
     service = services[module]
     frame_index = 0
     loop = asyncio.get_running_loop()
-    sequence_state = service.create_sequence_state() if hasattr(service, "create_sequence_state") else None
+    sequence_state = None
+    if hasattr(service, "create_sequence_state"):
+        try:
+            sequence_state = service.create_sequence_state()
+        except Exception as exc:
+            logger.warning("初始化连续识别状态失败，降级为无状态模式: %s", exc)
+            sequence_state = None
+    police_confirmed_gesture = None
+    police_confirmed_count = 0
+    police_confirm_threshold = 3
+    police_min_confidence = 0.4
     try:
         while True:
             data = await websocket.receive_text()
@@ -151,6 +161,18 @@ async def ws_stream(websocket: WebSocket, module: str):
                             frame_array,
                             sequence_state,
                         )
+                        if module == "police":
+                            gesture = result.get("gesture")
+                            confidence = float(result.get("confidence", 0.0) or 0.0)
+                            if gesture == police_confirmed_gesture and confidence >= police_min_confidence:
+                                police_confirmed_count += 1
+                            else:
+                                police_confirmed_gesture = gesture
+                                police_confirmed_count = 1 if confidence >= police_min_confidence else 0
+
+                            result = dict(result)
+                            result["confirmed"] = confidence >= police_min_confidence and police_confirmed_count >= police_confirm_threshold
+                            result["confirmed_count"] = police_confirmed_count
                     except Exception as exc:
                         logger.exception("gesture video frame failed: %s", exc)
                         await _log_stream_error(module, str(exc))

@@ -51,6 +51,15 @@ def resolve_yolo_lpr_weights() -> tuple[str, str]:
     return str(yolo), str(lpr)
 
 
+def _preprocess_lpr_crop(plate_image: np.ndarray) -> np.ndarray:
+    img = cv2.resize(plate_image, (94, 24))
+    img = img.astype("float32")
+    img -= 127.5
+    img *= 0.0078125
+    img = np.transpose(img, (2, 0, 1))
+    return np.expand_dims(img, axis=0)
+
+
 def greedy_decode(prebs: torch.Tensor) -> str:
     if isinstance(prebs, torch.Tensor):
         prebs = prebs.detach().cpu().numpy()
@@ -91,12 +100,7 @@ class YoloLprPipeline:
     def recognize_plate_crop(self, plate_image: np.ndarray) -> str:
         if plate_image is None or len(plate_image.shape) != 3:
             return "识别失败"
-        img = cv2.resize(plate_image, (94, 24))
-        img = img.astype("float32")
-        img -= 127.5
-        img *= 0.0078125
-        img = img.transpose(2, 0, 1)
-        img = np.expand_dims(img, axis=0)
+        img = _preprocess_lpr_crop(plate_image)
         img_tensor = torch.from_numpy(img).to(self.device)
         with torch.no_grad():
             prebs = self.lprnet(img_tensor)
@@ -116,6 +120,9 @@ class YoloLprPipeline:
                 continue
             plate_image = frame[y1:y2, x1:x2]
             plate_text = self.recognize_plate_crop(plate_image)
+            plate_text_clean = plate_text.replace("无法识别", "").strip()
+            if len(plate_text_clean) < 5:
+                continue
             plate_results.append({
                 "plate_number": plate_text,
                 "bbox": [x1, y1, x2, y2],

@@ -104,11 +104,32 @@ class PoliceGestureService:
             "yolo_loaded": self._yolo_model is not None,
         }
 
+    def test_yolo_pose_model(self) -> dict[str, Any]:
+        model_path = Path(settings.base_dir / settings.police_yolo_pose_model).resolve()
+        exists = model_path.is_file()
+        load_error = None
+        loaded = False
+        if exists:
+            try:
+                _ = self.yolo_model
+                loaded = self._yolo_model is not None
+            except Exception as exc:
+                load_error = str(exc)
+        else:
+            load_error = f"model file not found: {model_path}"
+        return {
+            "model_path": str(model_path),
+            "exists": exists,
+            "loaded": loaded,
+            "backend": self.pose_backend,
+            "load_error": load_error,
+        }
+
     def _load_ctpgr_predictor(self):
         if not self.ctpgr_root.exists():
             raise FileNotFoundError(f"ctpgr project not found: {self.ctpgr_root}")
         checkpoints = self.ctpgr_root / "checkpoints"
-        missing = [name for name in ("pose_model.pt", "lstm.pt") if not (checkpoints / name).is_file()]
+        missing = [name for name in ("pose_model.pt", "lstm.pt", "lstm_yolo11s.pt") if not (checkpoints / name).is_file()]
         if missing:
             raise FileNotFoundError(f"missing ctpgr checkpoints: {', '.join(missing)}")
         root_str = str(self.ctpgr_root)
@@ -162,13 +183,22 @@ class PoliceGestureService:
         return 0.0
 
     def create_sequence_state(self) -> dict[str, Any]:
-        return {
-            "h": torch.zeros_like(self.g_model.h0()),
-            "c": torch.zeros_like(self.g_model.c0()),
-            "last_coord": None,
-            "last_box": None,
-            "missed_pose_frames": 0,
-        }
+        try:
+            return {
+                "h": torch.zeros_like(self.g_model.h0()),
+                "c": torch.zeros_like(self.g_model.c0()),
+                "last_coord": None,
+                "last_box": None,
+                "missed_pose_frames": 0,
+            }
+        except FileNotFoundError:
+            return {
+                "h": None,
+                "c": None,
+                "last_coord": None,
+                "last_box": None,
+                "missed_pose_frames": 0,
+            }
 
     @staticmethod
     def _select_person_index(boxes: np.ndarray, previous_box: np.ndarray | None = None) -> int:
@@ -339,6 +369,9 @@ class PoliceGestureService:
         features = torch.from_numpy(features).to(self.g_model.device, dtype=torch.float32)
         if state is None:
             state = self.create_sequence_state()
+        if state.get("h") is None or state.get("c") is None:
+            state["h"] = torch.zeros_like(self.g_model.h0())
+            state["c"] = torch.zeros_like(self.g_model.c0())
         with self._model_lock, torch.no_grad():
             _, h, c, class_out = self.g_model(features, state["h"], state["c"])
         state["h"], state["c"] = h, c

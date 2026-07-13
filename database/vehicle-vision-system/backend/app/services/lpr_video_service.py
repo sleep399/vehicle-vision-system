@@ -38,15 +38,9 @@ class LprVideoService:
         self._rtsp_history_ready: set[str] = set()
 
     def _resolve_weights(self) -> tuple[str, str]:
-        yolo_candidates = [ASSET_ROOT / "weights" / "best.pt", ASSET_ROOT / "weights" / "yolo11n.pt"]
-        lpr_candidates = [ASSET_ROOT / "weights" / "Final_LPRNet_model.pth", ASSET_ROOT / "weights" / "lprnet.pth"]
-        yolo = next((p for p in yolo_candidates if p.exists()), None)
-        lpr = next((p for p in lpr_candidates if p.exists()), None)
-        if not yolo:
-            raise FileNotFoundError(f"未找到 YOLO 权重: {ASSET_ROOT / 'weights'}")
-        if not lpr:
-            raise FileNotFoundError(f"未找到 LPRNet 权重: {ASSET_ROOT / 'weights'}")
-        return str(yolo), str(lpr)
+        from runtime_api import find_default_models
+        cfg = find_default_models()
+        return cfg.yolo_model, cfg.lpr_model
 
     def _load_runtime(self):
         if self._runtime is not None and self._error is None:
@@ -81,6 +75,49 @@ class LprVideoService:
             "message": self._error or f"请将权重放到 `{ASSET_ROOT / 'weights'}`",
         }
 
+    def _is_valid_plate_text(self, text: str) -> bool:
+        text = (text or "").replace("无法识别", "").strip()
+        if len(text) < 4:
+            return False
+        return True
+
+    def _extract_plate_identity(self, plate: dict[str, Any]) -> str:
+        return str(plate.get("text") or plate.get("plate_number") or "").replace("无法识别", "").strip()
+
+    def _filter_and_fuse_plate_results(self, plate_results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        fused: dict[str, dict[str, Any]] = {}
+        for p in plate_results:
+            plate_text = self._extract_plate_identity(p)
+            if not self._is_valid_plate_text(plate_text):
+                continue
+            plate_color = str(p.get("plate_color") or "蓝牌")
+            key = f"{plate_text}|{plate_color}"
+            agg = fused.setdefault(key, {
+                "plate_number": plate_text,
+                "plate_color": plate_color,
+                "confidence_sum": 0.0,
+                "hit_count": 0,
+                "max_confidence": 0.0,
+                "coords": p.get("coords", (0, 0, 0, 0)),
+            })
+            confidence = float(p.get("confidence", 0.0))
+            agg["confidence_sum"] += confidence
+            agg["hit_count"] += 1
+            agg["max_confidence"] = max(agg["max_confidence"], confidence)
+        filtered = []
+        for agg in fused.values():
+            if agg["hit_count"] < 2 and agg["max_confidence"] < 0.55:
+                continue
+            filtered.append({
+                "text": agg["plate_number"],
+                "plate_color": agg["plate_color"],
+                "confidence": round(agg["confidence_sum"] / max(agg["hit_count"], 1), 3),
+                "max_confidence": round(agg["max_confidence"], 3),
+                "hit_count": agg["hit_count"],
+                "coords": agg["coords"],
+            })
+        return filtered
+
     def recognize_frame(self, frame: np.ndarray, frame_index: int = 0) -> dict[str, Any]:
         self._load_runtime()
         if not self.model_available():
@@ -97,13 +134,15 @@ class LprVideoService:
         logger.info("[LPR-FRAME] start frame=%s shape=%s dtype=%s min=%s max=%s", frame_index, getattr(frame, "shape", None), getattr(frame, "dtype", None), int(frame.min()) if frame is not None and frame.size else None, int(frame.max()) if frame is not None and frame.size else None)
         result_frame, plate_results = self._runtime.process_frame(frame)
         logger.info("[LPR-FRAME] raw_candidates frame=%s count=%s", frame_index, len(plate_results))
-        for idx, p in enumerate(plate_results):
+        filtered_results = self._filter_and_fuse_plate_results(plate_results)
+        for idx, p in enumerate(filtered_results):
             logger.info(
-                "[LPR-FRAME] candidate frame=%s idx=%s text=%s conf=%.3f coords=%s",
+                "[LPR-FRAME] candidate frame=%s idx=%s text=%s conf=%.3f hit=%s coords=%s",
                 frame_index,
                 idx,
                 p.get("text", ""),
                 float(p.get("confidence", 0.0)),
+                p.get("hit_count", 0),
                 p.get("coords", None),
             )
         result = {
@@ -114,13 +153,15 @@ class LprVideoService:
                     "bbox": list(p.get("coords", (0, 0, 0, 0))),
                     "indices": [],
                     "confidence": float(p.get("confidence", 0.0)),
+                    "hit_count": int(p.get("hit_count", 0)),
+                    "max_confidence": float(p.get("max_confidence", 0.0)),
                     "source": "yolo_lprnet",
                 }
-                for p in plate_results
+                for p in filtered_results
             ],
-            "plate_count": len(plate_results),
+            "plate_count": len(filtered_results),
             "annotated_image": ndarray_to_base64(result_frame),
-            "success": len(plate_results) > 0,
+            "success": len(filtered_results) > 0,
             "source": "yolo_lprnet",
             "model_available": True,
             "frame": frame_index,
