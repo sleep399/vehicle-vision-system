@@ -1,6 +1,5 @@
 import json
 import logging
-import re
 import uuid
 from pathlib import Path
 from urllib.parse import unquote, urlparse
@@ -17,13 +16,11 @@ from app.services.lpr_video_service import lpr_video_service
 from app.utils.auth import get_current_user, oauth2_scheme
 from app.utils.crypto import encrypt_json, decrypt_json
 from app.utils.recognition_monitor import record_lpr_recognition
+from app.utils.plate_number import is_valid_plate_number
 from app.config import settings
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/lpr", tags=["车牌识别"])
-
-PLATE_RE = re.compile(r"^[\u4e00-\u9fa5A-Z]{1}[A-Z][A-Z0-9]{5}$")
-
 
 def _preview_user_id(token: str | None, user, db: Session) -> int | None:
     """Resolve the query token used by ``<img>`` MJPEG requests.
@@ -140,7 +137,7 @@ async def recognize_video(
             total_candidates += 1
             plate_number = (p.get("plate_number") or "").strip()
             confidence = float(p.get("confidence", 0.0))
-            valid_format = bool(plate_number and PLATE_RE.match(plate_number))
+            valid_format = is_valid_plate_number(plate_number)
             valid_conf = confidence >= 0.35
             logger.info(
                 "[LPR-API] plate candidate frame=%s plate=%s conf=%.3f format=%s conf_ok=%s",
@@ -374,7 +371,7 @@ async def save_video_history(
     for p in plates:
         plate_number = (p.get("plate_number") or "").strip()
         confidence = float(p.get("confidence", 0.0))
-        if not plate_number or not PLATE_RE.match(plate_number) or confidence < 0.65:
+        if not is_valid_plate_number(plate_number) or confidence < 0.65:
             continue
         key = (plate_number, p.get("plate_color", "蓝牌"))
         if key in seen:

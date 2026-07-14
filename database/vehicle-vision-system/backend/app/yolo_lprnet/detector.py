@@ -10,18 +10,36 @@ from ultralytics import YOLO
 
 
 class YOLOPlateDetector:
-    def __init__(self, model_path, conf_threshold=0.4, iou_threshold=0.5, imgsz=960, max_det=20):
-        if not os.path.exists(model_path):
-            raise FileNotFoundError(f"未找到YOLO模型文件: {model_path}")
-        self.model = YOLO(model_path)
+    def __init__(
+        self,
+        model_path,
+        conf_threshold=0.4,
+        iou_threshold=0.5,
+        imgsz=960,
+        max_det=20,
+        min_box_width=0,
+        min_box_height=0,
+        min_plate_area_ratio=0.0015,
+        max_plate_area_ratio=0.2,
+        min_plate_aspect_ratio=1.8,
+        max_plate_aspect_ratio=6.5,
+        model=None,
+    ):
+        if model is None:
+            if not os.path.exists(model_path):
+                raise FileNotFoundError(f"未找到YOLO模型文件: {model_path}")
+            model = YOLO(model_path)
+        self.model = model
         self.conf_threshold = conf_threshold
         self.iou_threshold = iou_threshold
         self.imgsz = imgsz
         self.max_det = max_det
-        self.min_plate_area_ratio = 0.0015
-        self.max_plate_area_ratio = 0.2
-        self.min_plate_aspect_ratio = 1.8
-        self.max_plate_aspect_ratio = 6.5
+        self.min_box_width = min_box_width
+        self.min_box_height = min_box_height
+        self.min_plate_area_ratio = min_plate_area_ratio
+        self.max_plate_area_ratio = max_plate_area_ratio
+        self.min_plate_aspect_ratio = min_plate_aspect_ratio
+        self.max_plate_aspect_ratio = max_plate_aspect_ratio
 
     def _looks_like_plate(self, box, image_shape) -> bool:
         h, w = image_shape[:2]
@@ -29,6 +47,8 @@ class YOLOPlateDetector:
         bw = max(0, x2 - x1)
         bh = max(0, y2 - y1)
         if bw <= 0 or bh <= 0:
+            return False
+        if bw < self.min_box_width or bh < self.min_box_height:
             return False
         area_ratio = (bw * bh) / float(max(1, w * h))
         aspect_ratio = bw / float(max(1, bh))
