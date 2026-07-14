@@ -75,6 +75,10 @@ class Settings(BaseSettings):
     police_yolo_pose_model: str = "yolo11s-pose.pt"
     police_gesture_model: str = "lstm_yolo11s.pt"
     police_pose_hold_frames: int = 5
+    # Keep disabled for checkpoints trained on the original raw YOLO
+    # coordinates.  Enable together with a repair-trained LSTM checkpoint.
+    police_pose_repair_enabled: bool = False
+    police_pose_repair_stats: str = "generated/yolo11s_arm_pose_stats.json"
     police_gesture_min_confidence: float = 0.35
     police_gesture_min_margin: float = 0.03
 
