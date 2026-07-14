@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="2200" height="1600" viewBox="0 0 2200 1600" role="img" aria-labelledby="title desc" xml:lang="zh-CN">
-  <title id="title">车载视觉感知与人机交互系统逻辑 ER 图（10 表）</title>
-  <desc id="desc">陈氏表示法逻辑 ER 图。中心为 users，认证域包含 verification_codes 和 wechat_login_sessions，视觉与控车域包含 license_plate_records、police_gesture_records、owner_gesture_records 和 vehicle_state，监控与融合域包含 system_logs、alert_events 和 scenario_conflicts。所有虚线均为应用层逻辑关系，当前数据库没有外键；scenario_conflicts 的 alert_id 逻辑关联 alert_events 的 id。</desc>
+  <title id="title">车载视觉感知与人机交互系统逻辑 ER 图（9 表）</title>
+  <desc id="desc">陈氏表示法逻辑 ER 图。中心为 users，认证域包含 verification_codes，视觉与控车域包含 license_plate_records、police_gesture_records、owner_gesture_records 和 vehicle_state，监控与融合域包含 system_logs、alert_events 和 scenario_conflicts。所有虚线均为应用层逻辑关系，当前数据库没有外键；scenario_conflicts 的 alert_id 逻辑关联 alert_events 的 id。</desc>
   <style>
     text { font-family: "Microsoft YaHei", "Noto Sans CJK SC", sans-serif; fill: #172033; text-anchor: middle; dominant-baseline: middle; }
     .background { fill: #f8fafc; }
@@ -24,42 +24,28 @@
   </style>
 
   <rect width="2200" height="1600" class="background"/>
-  <text x="1100" y="42" class="title">车载视觉感知与人机交互系统逻辑 ER 图（10 表）</text>
+  <text x="1100" y="42" class="title">车载视觉感知与人机交互系统逻辑 ER 图（9 表）</text>
   <text x="1100" y="76" class="subtitle">矩形＝实体表　菱形＝逻辑联系　椭圆＝关键属性　下划线＝主键　虚线＝应用层维护、未建数据库外键</text>
   <text x="1100" y="101" class="subtitle">关系基数按当前数据库约束表达：子记录可关联 0..1 个用户，一个用户可拥有 0..n 条子记录</text>
 
-  <text x="1100" y="142" class="domain">认证域</text>
+  <text x="760" y="260" class="domain">认证域</text>
   <text x="330" y="408" class="domain">视觉识别与控车域</text>
   <text x="1850" y="408" class="domain">监控与场景融合域</text>
   <text x="1100" y="548" class="domain">公共用户域</text>
 
   <!-- verification_codes -->
-  <rect x="490" y="230" width="320" height="80" class="entity"/>
-  <text x="650" y="257" class="entity-name">验证码</text>
-  <text x="650" y="286" class="entity-code">verification_codes</text>
-  <ellipse cx="510" cy="160" rx="48" ry="27" class="attribute"/>
-  <text x="510" y="160" class="attribute-text key">id</text>
-  <line x1="530" y1="185" x2="555" y2="230" class="edge"/>
-  <ellipse cx="650" cy="142" rx="92" ry="27" class="attribute"/>
-  <text x="650" y="142" class="attribute-text">target_lookup</text>
-  <line x1="650" y1="169" x2="650" y2="230" class="edge"/>
-  <ellipse cx="790" cy="160" rx="65" ry="27" class="attribute"/>
-  <text x="790" y="160" class="attribute-text">purpose</text>
-  <line x1="770" y1="185" x2="745" y2="230" class="edge"/>
-
-  <!-- wechat_login_sessions -->
-  <rect x="1390" y="230" width="320" height="80" class="entity"/>
-  <text x="1550" y="257" class="entity-name">微信扫码会话</text>
-  <text x="1550" y="286" class="entity-code">wechat_login_sessions</text>
-  <ellipse cx="1410" cy="160" rx="48" ry="27" class="attribute"/>
-  <text x="1410" y="160" class="attribute-text key">id</text>
-  <line x1="1430" y1="185" x2="1455" y2="230" class="edge"/>
-  <ellipse cx="1550" cy="142" rx="67" ry="27" class="attribute"/>
-  <text x="1550" y="142" class="attribute-text">user_id</text>
-  <line x1="1550" y1="169" x2="1550" y2="230" class="edge"/>
-  <ellipse cx="1690" cy="160" rx="82" ry="27" class="attribute"/>
-  <text x="1690" y="160" class="attribute-text">session_id</text>
-  <line x1="1670" y1="185" x2="1645" y2="230" class="edge"/>
+  <rect x="940" y="230" width="320" height="80" class="entity"/>
+  <text x="1100" y="257" class="entity-name">验证码</text>
+  <text x="1100" y="286" class="entity-code">verification_codes</text>
+  <ellipse cx="960" cy="160" rx="48" ry="27" class="attribute"/>
+  <text x="960" y="160" class="attribute-text key">id</text>
+  <line x1="980" y1="185" x2="1005" y2="230" class="edge"/>
+  <ellipse cx="1100" cy="142" rx="92" ry="27" class="attribute"/>
+  <text x="1100" y="142" class="attribute-text">target_lookup</text>
+  <line x1="1100" y1="169" x2="1100" y2="230" class="edge"/>
+  <ellipse cx="1240" cy="160" rx="65" ry="27" class="attribute"/>
+  <text x="1240" y="160" class="attribute-text">purpose</text>
+  <line x1="1220" y1="185" x2="1195" y2="230" class="edge"/>
 
   <!-- users -->
   <rect x="970" y="682" width="260" height="80" class="entity"/>
@@ -181,20 +167,12 @@
   <line x1="1910" y1="1301" x2="1885" y2="1230" class="edge"/>
 
   <!-- users -> verification_codes -->
-  <polygon points="850,455 930,490 850,525 770,490" class="relationship"/>
-  <text x="850" y="490" class="relationship-label">邮箱摘要匹配</text>
-  <path d="M970 700 H900 V540 L930 490" class="edge logical"/>
-  <line x1="770" y1="490" x2="700" y2="310" class="edge logical"/>
-  <text x="918" y="665" class="cardinality">0..1</text>
-  <text x="718" y="352" class="cardinality">0..n</text>
-
-  <!-- users -> wechat_login_sessions -->
-  <polygon points="1350,455 1430,490 1350,525 1270,490" class="relationship"/>
-  <text x="1350" y="490" class="relationship-label">确认登录</text>
-  <path d="M1230 700 H1300 V540 L1270 490" class="edge logical"/>
-  <line x1="1430" y1="490" x2="1510" y2="310" class="edge logical"/>
-  <text x="1282" y="665" class="cardinality">0..1</text>
-  <text x="1492" y="352" class="cardinality">0..n</text>
+  <polygon points="900,455 980,490 900,525 820,490" class="relationship"/>
+  <text x="900" y="490" class="relationship-label">邮箱摘要匹配</text>
+  <path d="M970 700 H900 V540 L980 490" class="edge logical"/>
+  <line x1="820" y1="490" x2="1030" y2="310" class="edge logical"/>
+  <text x="930" y="665" class="cardinality">0..1</text>
+  <text x="1010" y="352" class="cardinality">0..n</text>
 
   <!-- users -> license_plate_records -->
   <polygon points="690,575 770,610 690,645 610,610" class="relationship"/>
